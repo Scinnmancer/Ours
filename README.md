@@ -1,7 +1,10 @@
-# Dual-head Swin UNETR with Zernike reliability
+# Dual-head Swin UNETR with probability-disagreement reliability
 
-This package implements the method described in `方案.md` without modifying the
-reference implementation in `baseline/`.
+This package implements a probability-disagreement risk calibration path without
+modifying the reference implementation in `baseline/`. Local Zernike modules
+remain in the model state layout only so existing warm-up checkpoints can still
+be loaded with strict state-dict validation; they are not computed or used by
+calibration, Z0 fitting, or evaluation.
 
 ## Probability convention
 
@@ -30,8 +33,8 @@ initialized.
 The checked-in split manifest is `ours/data/splits/brats2020_reliability.json`.
 With seed 2026, TCIA is the source domain (134 training and 33 validation
 cases). CBICA (129), 2013 (30), and TMC (9) are kept as three disjoint OOD test
-domains. Source validation is used for checkpoint selection, Zernike statistics
-configuration, and Z0 fitting; it is not reported as an independent test set.
+domains. Source validation is used for checkpoint selection and Z0 fitting; it
+is not reported as an independent test set.
 
 ## Environment
 
@@ -70,9 +73,23 @@ python -m ours.train --config ours/configs/brats2020.yaml --stage all \
   --set data.workers=4 --set training.warmup_epochs=2 --set data.debug_cases=2
 ```
 
-The stages may also be run separately. `warmup` writes `best_seg.pt`, `stats`
-writes `stats_fitted.pt`, and `calibration` writes `best_calibrated.pt` and the
-final checkpoint with validation-fitted `Z0`.
+The stages may also be run separately. `warmup` writes `best_seg.pt`, while
+`calibration` writes `best_calibrated.pt` and the final checkpoint with
+validation-fitted `Z0`. The former `stats` stage is disabled because geometric
+disagreement is inactive. An existing same-architecture warm-up checkpoint can
+start calibration directly:
+
+```bash
+python -m ours.train --config ours/configs/brats2020.yaml --stage calibration \
+  --checkpoint ours/runs/dual_swin_zernike_brats2020/best_seg.pt
+```
+
+Calibration freezes the shared encoder and both decoders by default, keeps the
+model in evaluation mode, feeds the same normalized patch to both heads, and
+optimizes only the probability-risk `eta` and `bias`. Set
+`training.freeze_segmentation_during_calibration=false` to recover joint
+fine-tuning. Probability disagreement is multiplied by
+`uncertainty.probability_disagreement_scale` (default `15.0`) before fusion.
 
 If the configured split JSON is absent, the training entry point generates the
 deterministic center-based splits before constructing data loaders. Run
@@ -82,18 +99,17 @@ is desired before training.
 ## Outputs
 
 Training stores the resolved configuration, environment metadata, baseline
-encoder loading report, checkpoints, Zernike statistics, and validation metrics
-under `ours/runs/<experiment>/`. Evaluation writes case-level and domain-level
+encoder loading report, checkpoints, segmentation-weight hashes, and validation
+metrics under `ours/runs/<experiment>/`. Evaluation writes case-level and domain-level
 CSV/JSON for both the base and refined predictions and can optionally save NIfTI
 segmentations by setting `evaluation.save_nifti=true`.
 
-Warm-up runs for 150 epochs by default. Once the Zernike source statistics have
-been fitted, calibration validation saves voxelwise uncertainty snapshots every
-10 epochs under `uncertainty_maps/calibration/epoch_XXXX/`. Each validation case
+Warm-up runs for 150 epochs by default. Calibration validation saves voxelwise
+uncertainty snapshots every 10 epochs under
+`uncertainty_maps/calibration/epoch_XXXX/`. Each validation case
 is stored as a compressed NPZ containing the fused uncertainty map, voxel error
 mask, base and target atomic labels, affine, epoch, and—when
-`monitoring.uncertainty_map_components=true`—the probability- and
-Zernike-disagreement component maps.
+`monitoring.uncertainty_map_components=true`—the probability-disagreement map.
 
 Every training launch also creates an immutable telemetry directory at
 `ours/runs/<experiment>/telemetry/<run_id>/`. Its manifest records the resolved
@@ -101,8 +117,9 @@ configuration, command, source/split/checkpoint fingerprints, split overlap
 counts, library/CUDA/GPU metadata, and determinism state. `events.jsonl` records
 per-epoch timing, learning rate, memory, parameter/gradient health, per-head and
 ensemble region Dice/volume fractions, head disagreement, AMP skipped steps,
-Zernike statistic health, uncertainty calibration/discrimination, learned
-fusion weights, checkpoint selection, plateau advisories, and terminal status.
+uncertainty calibration/discrimination, active fusion parameters and scale,
+checkpoint selection, frozen segmentation hashes, plateau advisories, and
+terminal status.
 No subject identifiers or voxel data are written to telemetry events.
 
 Monitoring overhead is controlled by `monitoring.gradient_interval`; batch-level
