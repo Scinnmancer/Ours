@@ -16,7 +16,7 @@ from .config import load_config
 from .data import brain_mask, build_loader, generate_splits
 from .inference import autocast_context, infer_volume
 from .losses import RegionDiceLoss, balanced_brier_loss
-from .metrics import aupr, auroc, expected_calibration_error, risk_calibration_metrics
+from .metrics import MetricSampleReservoir, aupr, auroc, expected_calibration_error, risk_calibration_metrics
 from .model import DualHeadOutput, DualHeadSwinUNETR
 from .monitoring import TrainingTelemetry, gradient_statistics
 from .reproducibility import save_run_metadata, set_reproducibility
@@ -317,11 +317,10 @@ def validate(
         )
         for name in ("head1", "head2", "base")
     }
-    confidences: list[np.ndarray] = []
-    correctness: list[np.ndarray] = []
-    uncertainties: list[np.ndarray] = []
-    probability_disagreements: list[np.ndarray] = []
-    zernike_disagreements: list[np.ndarray] = []
+    metric_samples = MetricSampleReservoir(
+        capacity=int(config["evaluation"].get("max_metric_voxels", 200000)),
+        seed=int(config["reproducibility"]["seed"]),
+    )
     positive_counts = {name: torch.zeros(3, dtype=torch.float64) for name in ("target", "head1", "head2", "base")}
     voxel_count = 0
     head_l1_sum = 0.0
@@ -372,14 +371,36 @@ def validate(
         mask = (target_atomic > 0) | (atomic.argmax(dim=1) > 0)
         if not bool(mask.any()):
             mask = torch.ones_like(mask, dtype=torch.bool)
-        confidences.append(atomic.max(dim=1).values[mask].float().cpu().numpy())
-        correctness.append((atomic.argmax(dim=1)[mask] == target_atomic[mask]).float().cpu().numpy())
+        samples = {
+            "confidence": atomic.max(dim=1).values[mask].float().cpu().numpy(),
+            "correct": (atomic.argmax(dim=1)[mask] == target_atomic[mask]).float().cpu().numpy(),
+        }
         if calibrated:
-            uncertainties.append(output.uncertainty[:, 0][mask].float().cpu().numpy())
-            probability_disagreements.append(output.probability_disagreement[:, 0][mask].float().cpu().numpy())
-            zernike_disagreements.append(output.zernike_disagreement[:, 0][mask].float().cpu().numpy())
-    confidence = np.concatenate(confidences) if confidences else np.empty(0)
-    correct = np.concatenate(correctness) if correctness else np.empty(0)
+            samples.update(
+                uncertainty=output.uncertainty[:, 0][mask].float().cpu().numpy(),
+                probability_disagreement=output.probability_disagreement[:, 0][mask].float().cpu().numpy(),
+                zernike_disagreement=output.zernike_disagreement[:, 0][mask].float().cpu().numpy(),
+            )
+        metric_samples.update(**samples)
+        del (
+            samples,
+            mask,
+            target_atomic,
+            target_regions,
+            atomic,
+            prediction,
+            probability,
+            base_prediction,
+            head_difference,
+            region_probabilities,
+            output,
+            image,
+            batch,
+        )
+        if device.type == "cuda" and bool(config["evaluation"].get("release_cuda_cache", True)):
+            torch.cuda.empty_cache()
+    confidence = metric_samples.values("confidence")
+    correct = metric_samples.values("correct")
     aggregated_dice: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     for name, metric in dice_metrics.items():
         dice_by_region, dice_not_nans = metric.aggregate()
@@ -403,11 +424,9 @@ def validate(
                 positive_counts[prediction_name][index] / max(voxel_count, 1)
             )
     if calibrated:
-        uncertainty = np.concatenate(uncertainties) if uncertainties else np.empty(0)
-        probability_disagreement = (
-            np.concatenate(probability_disagreements) if probability_disagreements else np.empty(0)
-        )
-        zernike_disagreement = np.concatenate(zernike_disagreements) if zernike_disagreements else np.empty(0)
+        uncertainty = metric_samples.values("uncertainty")
+        probability_disagreement = metric_samples.values("probability_disagreement")
+        zernike_disagreement = metric_samples.values("zernike_disagreement")
         metrics.update(
             risk_calibration_metrics(
                 uncertainty,
@@ -498,21 +517,23 @@ def fit_zernike_statistics(
 @torch.no_grad()
 def fit_z0(model: DualHeadSwinUNETR, loader, device: torch.device, config: dict[str, Any]) -> float:
     model.eval()
-    values = []
+    values = MetricSampleReservoir(
+        capacity=int(config["evaluation"].get("max_metric_voxels", 200000)),
+        seed=int(config["reproducibility"]["seed"]),
+    )
     for batch in loader:
         image = batch["image"].to(device, non_blocking=True)
         output = infer_volume(model, image, config, compute_uncertainty=True)
         evidence = model.label_transfer.evidence(output.uncertainty)
         mask = brain_mask(image)
         selected = evidence[mask]
-        if selected.numel() > 200000:
-            indices = torch.linspace(0, selected.numel() - 1, 200000, device=selected.device).long()
-            selected = selected[indices]
-        values.append(selected.float().cpu())
-    if not values:
+        values.update(evidence=selected.float().cpu().numpy())
+        del selected, mask, evidence, output, image, batch
+    evidence_values = values.values("evidence")
+    if evidence_values.size == 0:
         raise RuntimeError("Cannot fit Z0 from an empty validation loader")
     quantile = float(config["label_transfer"].get("z0_quantile", 0.5))
-    z0 = float(torch.quantile(torch.cat(values), quantile).clamp_min(1e-6))
+    z0 = max(float(np.quantile(evidence_values, quantile)), 1e-6)
     model.label_transfer.set_z0(z0)
     return z0
 

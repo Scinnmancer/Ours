@@ -116,5 +116,12 @@ AUROC/AUPR likewise use `u` against errors in the base prediction. Calibration
 checkpoints are selected by minimum source-validation `risk_ece`, subject to the
 configured Dice tolerance.
 
+Validation calibration statistics use a deterministic reservoir capped by
+`evaluation.max_metric_voxels`, so their host-memory cost does not grow with the
+number of cases. Standalone evaluation also drops unused label representations,
+offloads the tensors needed by CPU metrics, and releases the CUDA allocator cache
+after each case by default; set `evaluation.release_cuda_cache=false` only when
+throughput is more important than a stable `nvidia-smi` footprint.
+
 The `val` split is reported as `source_val`, not as an independent ID test. Only
 the three held-out centers are treated as OOD tests.

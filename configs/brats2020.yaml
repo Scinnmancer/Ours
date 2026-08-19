@@ -75,6 +75,7 @@ evaluation:
   calibration_bins: 15
   high_confidence_threshold: 0.95
   save_nifti: false
+  release_cuda_cache: true
 
 monitoring:
   enabled: true
