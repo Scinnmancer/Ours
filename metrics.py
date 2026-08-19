@@ -9,6 +9,60 @@ import torch
 from .probability import atomic_to_regions, scalar_to_atomic, scalar_to_regions
 
 
+class MetricSampleReservoir:
+    """Keep a deterministic, uniformly sampled, bounded set of aligned metrics."""
+
+    def __init__(self, capacity: int, seed: int = 0):
+        if capacity <= 0:
+            raise ValueError("capacity must be a positive integer")
+        self.capacity = int(capacity)
+        self._rng = np.random.default_rng(seed)
+        self._priorities = np.empty(0, dtype=np.float64)
+        self._values: dict[str, np.ndarray] = {}
+
+    def update(self, **values: np.ndarray) -> None:
+        if not values:
+            return
+        arrays = {name: np.asarray(value).reshape(-1) for name, value in values.items()}
+        sizes = {array.size for array in arrays.values()}
+        if len(sizes) != 1:
+            raise ValueError("All metric sample arrays must have the same size")
+        count = sizes.pop()
+        if count == 0:
+            return
+        if self._values and arrays.keys() != self._values.keys():
+            raise ValueError("Metric sample fields must remain unchanged between updates")
+
+        priorities = self._rng.random(count)
+        # Reduce a large incoming case before merging so temporary storage is
+        # bounded by roughly twice the configured reservoir size.
+        if count > self.capacity:
+            selected = np.argpartition(priorities, self.capacity - 1)[: self.capacity]
+            priorities = priorities[selected]
+            arrays = {name: array[selected] for name, array in arrays.items()}
+
+        if self._priorities.size:
+            priorities = np.concatenate((self._priorities, priorities))
+            arrays = {
+                name: np.concatenate((self._values[name], array))
+                for name, array in arrays.items()
+            }
+        if priorities.size > self.capacity:
+            selected = np.argpartition(priorities, self.capacity - 1)[: self.capacity]
+            priorities = priorities[selected]
+            arrays = {name: array[selected] for name, array in arrays.items()}
+        self._priorities = priorities
+        self._values = arrays
+
+    def values(self, name: str) -> np.ndarray:
+        if name not in self._values:
+            return np.empty(0, dtype=np.float32)
+        return self._values[name]
+
+    def __len__(self) -> int:
+        return int(self._priorities.size)
+
+
 def _trapezoid(y: np.ndarray, x: np.ndarray) -> float:
     if hasattr(np, "trapezoid"):
         return float(np.trapezoid(y, x))

@@ -142,6 +142,12 @@ def generate_splits(
 
 
 class ConvertBraTSLabelsd:
+    def __init__(self, outputs: tuple[str, ...] = ("scalar", "atomic", "regions")):
+        allowed = {"scalar", "atomic", "regions"}
+        if not set(outputs).issubset(allowed):
+            raise ValueError(f"Unknown label outputs: {sorted(set(outputs) - allowed)}")
+        self.outputs = outputs
+
     def __call__(self, item: dict[str, Any]) -> dict[str, Any]:
         result = dict(item)
         label = torch.as_tensor(result["label"])
@@ -150,9 +156,15 @@ class ConvertBraTSLabelsd:
         if label.ndim != 4 or label.shape[0] != 1:
             raise ValueError(f"Expected scalar label [1,D,H,W], got {tuple(label.shape)}")
         batched = label.unsqueeze(0)
-        result["label_scalar"] = label.long()
-        result["label_atomic"] = scalar_to_atomic(batched).squeeze(0)
-        result["label_regions"] = scalar_to_regions(batched).squeeze(0)
+        if "scalar" in self.outputs:
+            result["label_scalar"] = label.to(dtype=torch.uint8)
+        if "atomic" in self.outputs:
+            result["label_atomic"] = scalar_to_atomic(batched).squeeze(0).to(dtype=torch.uint8)
+        if "regions" in self.outputs:
+            result["label_regions"] = scalar_to_regions(batched).squeeze(0)
+        # The loaded scalar label is otherwise retained alongside every derived
+        # full-volume representation by MONAI's dictionary transforms.
+        result.pop("label", None)
         return result
 
 
@@ -190,10 +202,18 @@ def _monai_transforms(config: dict[str, Any], mode: str):
         probability = float(config["data"].get("flip_probability", 0.2))
         for axis in range(3):
             common.append(transforms.RandFlipd(keys=["image", "label"], prob=probability, spatial_axis=axis))
+    label_outputs = {
+        "train": ("atomic", "regions"),
+        "eval": ("atomic", "regions"),
+        "stats": (),
+        "test": ("scalar",),
+    }.get(mode)
+    if label_outputs is None:
+        raise ValueError(f"Unknown loader mode: {mode}")
     common.extend(
         [
             transforms.NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
-            ConvertBraTSLabelsd(),
+            ConvertBraTSLabelsd(label_outputs),
         ]
     )
     if mode == "train":
@@ -214,7 +234,12 @@ def _monai_transforms(config: dict[str, Any], mode: str):
                 ),
             ]
         )
-    keys = ["image", "label_scalar", "label_atomic", "label_regions"]
+    label_keys = {
+        "scalar": "label_scalar",
+        "atomic": "label_atomic",
+        "regions": "label_regions",
+    }
+    keys = ["image", *(label_keys[name] for name in label_outputs)]
     if mode == "train":
         keys.extend(["image_view1", "image_view2"])
     common.append(transforms.ToTensord(keys=keys))
@@ -222,7 +247,7 @@ def _monai_transforms(config: dict[str, Any], mode: str):
 
 
 def _loader_runtime_options(config: dict[str, Any], mode: str) -> dict[str, Any]:
-    is_evaluation = mode == "eval"
+    is_evaluation = mode in ("eval", "test")
     workers = int(
         config.get("evaluation", {}).get("workers", 0)
         if is_evaluation

@@ -94,6 +94,8 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("data.workers must be a non-negative integer")
     if int(config["evaluation"].get("workers", 0)) < 0:
         raise ValueError("evaluation.workers must be a non-negative integer")
+    if int(config["evaluation"].get("max_metric_voxels", 200000)) <= 0:
+        raise ValueError("evaluation.max_metric_voxels must be a positive integer")
     monitoring = config.get("monitoring", {})
     if int(monitoring.get("batch_interval", 0)) < 0:
         raise ValueError("monitoring.batch_interval must be a non-negative integer")

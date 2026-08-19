@@ -16,7 +16,7 @@ from .data import build_loader
 from .inference import infer_volume
 from .metrics import evaluate_case
 from .model import DualHeadSwinUNETR
-from .probability import atomic_label_to_scalar
+from .probability import atomic_label_to_scalar, atomic_to_regions
 from .reproducibility import save_run_metadata, set_reproducibility
 
 
@@ -95,6 +95,66 @@ def _summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return summaries
 
 
+def _required_cpu_tensor(value: torch.Tensor | None, name: str) -> torch.Tensor:
+    if value is None:
+        raise RuntimeError(f"Evaluation output is missing {name}")
+    return value.detach().to(device="cpu", dtype=torch.float32)
+
+
+def _evaluate_batch(
+    model: DualHeadSwinUNETR,
+    batch: dict[str, Any],
+    device: torch.device,
+    config: dict[str, Any],
+    output: Path,
+    domain: str,
+    index: int,
+    batch_count: int,
+) -> list[dict[str, Any]]:
+    evaluation = config["evaluation"]
+    image = batch["image"].to(device, non_blocking=True)
+    result = infer_volume(model, image, config, compute_uncertainty=True, refine=True)
+    case = _case_name(batch, index)
+    affine = _affine(batch) if bool(evaluation.get("save_nifti", False)) else None
+
+    # Keep only what the metrics need and move it off the accelerator before
+    # CPU metric computation. DualHeadOutput also owns logits, both heads and
+    # disagreement maps, which otherwise remain live for the whole case.
+    base_region_probability = _required_cpu_tensor(result.base_region_probability, "base region probability")
+    base_atomic_probability = _required_cpu_tensor(result.base_atomic_probability, "base atomic probability")
+    refined_atomic_probability = _required_cpu_tensor(
+        result.refined_atomic_probability, "refined atomic probability"
+    )
+    refined_region_probability = atomic_to_regions(refined_atomic_probability)
+    uncertainty = _required_cpu_tensor(result.uncertainty, "uncertainty")
+    del result, image
+
+    case_rows: list[dict[str, Any]] = []
+    for prediction_name, probability, region_probability in (
+        ("base", base_atomic_probability, base_region_probability),
+        ("refined", refined_atomic_probability, refined_region_probability),
+    ):
+        metrics = evaluate_case(
+            probability,
+            uncertainty,
+            batch["label_scalar"],
+            region_probability=region_probability,
+            risk_reference_probability=base_atomic_probability,
+            bins=int(evaluation.get("calibration_bins", 15)),
+            max_voxels=int(evaluation.get("max_metric_voxels", 200000)),
+            high_confidence_threshold=float(evaluation.get("high_confidence_threshold", 0.95)),
+        )
+        case_rows.append({"domain": domain, "prediction": prediction_name, "case": case, **metrics})
+        print(f"{domain} {index + 1}/{batch_count} {case} {prediction_name} dice={metrics['mean_dice']:.4f}")
+    if bool(evaluation.get("save_nifti", False)):
+        label = refined_atomic_probability.argmax(dim=1)[0]
+        scalar = atomic_label_to_scalar(label).numpy().astype(np.uint8)
+        prediction_dir = output / "nifti" / domain
+        prediction_dir.mkdir(parents=True, exist_ok=True)
+        nib.save(nib.Nifti1Image(scalar, affine), prediction_dir / f"{case}.nii.gz")
+    return case_rows
+
+
 @torch.inference_mode()
 def run_evaluation(config: dict[str, Any], checkpoint: str, output_dir: str | None = None) -> Path:
     seed = int(config["reproducibility"]["seed"])
@@ -118,34 +178,25 @@ def run_evaluation(config: dict[str, Any], checkpoint: str, output_dir: str | No
     evaluation = config["evaluation"]
     for split in evaluation["splits"]:
         domain = "source_val" if split == "val" else split.removeprefix("test_")
-        loader = build_loader(config, split, "eval")
+        loader = build_loader(config, split, "test")
         for index, batch in enumerate(loader):
-            image = batch["image"].to(device, non_blocking=True)
-            result = infer_volume(model, image, config, compute_uncertainty=True, refine=True)
-            case = _case_name(batch, index)
-            for prediction_name, probability, region_probability in (
-                ("base", result.base_atomic_probability, result.base_region_probability),
-                ("refined", result.refined_atomic_probability, result.refined_region_probability),
-            ):
-                metrics = evaluate_case(
-                    probability,
-                    result.uncertainty,
-                    batch["label_scalar"],
-                    region_probability=region_probability,
-                    risk_reference_probability=result.base_atomic_probability,
-                    bins=int(evaluation.get("calibration_bins", 15)),
-                    max_voxels=int(evaluation.get("max_metric_voxels", 200000)),
-                    high_confidence_threshold=float(evaluation.get("high_confidence_threshold", 0.95)),
+            try:
+                rows.extend(
+                    _evaluate_batch(
+                        model,
+                        batch,
+                        device,
+                        config,
+                        output,
+                        domain,
+                        index,
+                        len(loader),
+                    )
                 )
-                rows.append({"domain": domain, "prediction": prediction_name, "case": case, **metrics})
-                print(f"{domain} {index + 1}/{len(loader)} {case} {prediction_name} dice={metrics['mean_dice']:.4f}")
-            if bool(evaluation.get("save_nifti", False)):
-                label = result.refined_atomic_probability.argmax(dim=1)[0].cpu()
-                scalar = atomic_label_to_scalar(label).numpy().astype(np.uint8)
-                prediction_dir = output / "nifti" / domain
-                prediction_dir.mkdir(parents=True, exist_ok=True)
-                nib.save(nib.Nifti1Image(scalar, _affine(batch)), prediction_dir / f"{case}.nii.gz")
-            del metrics, probability, region_probability, result, image, batch
+            finally:
+                del batch
+                if device.type == "cuda" and bool(evaluation.get("release_cuda_cache", True)):
+                    torch.cuda.empty_cache()
     summary = _summary(rows)
     _write_csv(output / "case_metrics.csv", rows)
     _write_csv(output / "summary_metrics.csv", summary)
