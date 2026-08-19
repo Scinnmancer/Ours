@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import shutil
@@ -20,7 +21,6 @@ from .metrics import MetricSampleReservoir, aupr, auroc, expected_calibration_er
 from .model import DualHeadOutput, DualHeadSwinUNETR
 from .monitoring import TrainingTelemetry, gradient_statistics
 from .reproducibility import save_run_metadata, set_reproducibility
-from .zernike import WelfordAccumulator
 
 
 def _run_dir(config: dict[str, Any]) -> Path:
@@ -72,8 +72,8 @@ def _save_uncertainty_batch(
 ) -> list[Path]:
     if output.uncertainty is None:
         raise RuntimeError("Cannot save uncertainty maps before uncertainty has been computed")
-    if save_components and (output.probability_disagreement is None or output.zernike_disagreement is None):
-        raise RuntimeError("Uncertainty component maps have not been computed")
+    if save_components and output.probability_disagreement is None:
+        raise RuntimeError("Probability disagreement has not been computed")
     numpy_dtype = np.float16 if dtype == "float16" else np.float32
     destination.mkdir(parents=True, exist_ok=True)
     prediction = output.base_atomic_probability.argmax(dim=1)
@@ -98,14 +98,6 @@ def _save_uncertainty_batch(
         if save_components:
             payload["probability_disagreement"] = (
                 output.probability_disagreement[sample_index, 0]
-                .detach()
-                .float()
-                .cpu()
-                .numpy()
-                .astype(numpy_dtype)
-            )
-            payload["zernike_disagreement"] = (
-                output.zernike_disagreement[sample_index, 0]
                 .detach()
                 .float()
                 .cpu()
@@ -137,6 +129,37 @@ def _make_scaler(enabled: bool):
     return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
+def segmentation_state_sha256(model: DualHeadSwinUNETR) -> str:
+    """Hash only the shared encoder and decoder parameters/buffers."""
+    prefixes = (*model.ENCODER_PREFIXES, "head1.", "head2.")
+    digest = hashlib.sha256()
+    for key, value in sorted(model.state_dict().items()):
+        if not key.startswith(prefixes):
+            continue
+        tensor = value.detach().to(device="cpu").contiguous()
+        digest.update(key.encode("utf-8"))
+        digest.update(str(tensor.dtype).encode("ascii"))
+        digest.update(str(tuple(tensor.shape)).encode("ascii"))
+        digest.update(tensor.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def configure_calibration_trainability(
+    model: DualHeadSwinUNETR,
+    freeze_segmentation: bool,
+) -> list[torch.nn.Parameter]:
+    """Select calibration parameters while keeping legacy raw_xi inactive."""
+    trainable_names = {"fusion.raw_eta", "fusion.bias"}
+    for name, parameter in model.named_parameters():
+        parameter.requires_grad_(not freeze_segmentation or name in trainable_names)
+        if name == "fusion.raw_xi":
+            parameter.requires_grad_(False)
+    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    if not parameters:
+        raise RuntimeError("Calibration has no trainable parameters")
+    return parameters
+
+
 def train_epoch(
     model: DualHeadSwinUNETR,
     loader,
@@ -149,8 +172,13 @@ def train_epoch(
     telemetry: TrainingTelemetry | None = None,
     stage: str = "warmup",
     epoch: int = 0,
-) -> dict[str, float]:
-    model.train()
+    freeze_segmentation: bool = False,
+) -> dict[str, Any]:
+    if freeze_segmentation:
+        model.eval()
+        model.fusion.train()
+    else:
+        model.train()
     started = time.perf_counter()
     totals = {
         "loss": 0.0,
@@ -165,7 +193,6 @@ def train_epoch(
         "gradient_samples": 0.0,
         "amp_skipped_steps": 0.0,
         "probability_disagreement": 0.0,
-        "zernike_disagreement": 0.0,
         "uncertainty_mean": 0.0,
     }
     intersections = {name: torch.zeros(3, dtype=torch.float64) for name in ("head1", "head2", "base")}
@@ -180,24 +207,29 @@ def train_epoch(
         telemetry.reset_peak_memory()
     for index, batch in enumerate(loader):
         batch_started = time.perf_counter()
-        image1 = batch["image_view1"].to(device, non_blocking=True)
-        image2 = batch["image_view2"].to(device, non_blocking=True)
+        if freeze_segmentation:
+            image1 = batch["image"].to(device, non_blocking=True)
+            image2 = None
+        else:
+            image1 = batch["image_view1"].to(device, non_blocking=True)
+            image2 = batch["image_view2"].to(device, non_blocking=True)
         target = batch["label_regions"].to(device, non_blocking=True)
         atomic_target = batch["label_atomic"].to(device, non_blocking=True).long()
         optimizer.zero_grad(set_to_none=True)
         with autocast_context(device, amp):
-            output = model(image1, image2, compute_uncertainty=lambda_u > 0.0)
+            compute_uncertainty = freeze_segmentation or lambda_u > 0.0
+            output = model(image1, image2, compute_uncertainty=compute_uncertainty)
             head_losses = [loss_function(logits, target) for logits in output.head_logits]
             segmentation = sum(head_losses)
             br = torch.zeros((), device=device)
-            if lambda_u > 0.0:
+            if compute_uncertainty:
                 error = (output.base_atomic_probability.argmax(dim=1) != atomic_target).to(output.uncertainty.dtype)
                 br = balanced_brier_loss(
                     output.uncertainty[:, 0],
                     error,
                     max_samples=int(config["uncertainty"].get("max_balanced_samples", 65536)),
                 )
-            loss = segmentation + lambda_u * br
+            loss = br if freeze_segmentation else segmentation + lambda_u * br
         scale_before = float(scaler.get_scale())
         scaler.scale(loss).backward()
         sample_gradient = (index + 1) % gradient_interval == 0 or index + 1 == len(loader)
@@ -242,9 +274,8 @@ def train_epoch(
             totals["head_region_l1"] += float(
                 (output.head_region_probabilities[0] - output.head_region_probabilities[1]).abs().mean()
             )
-            if lambda_u > 0.0:
+            if compute_uncertainty:
                 totals["probability_disagreement"] += float(output.probability_disagreement.mean())
-                totals["zernike_disagreement"] += float(output.zernike_disagreement.mean())
                 totals["uncertainty_mean"] += float(output.uncertainty.mean())
         if telemetry is not None and batch_interval > 0 and (index + 1) % batch_interval == 0:
             telemetry.event(
@@ -290,6 +321,9 @@ def train_epoch(
             )
     metrics["duration_seconds"] = time.perf_counter() - started
     metrics["lambda_u"] = float(lambda_u)
+    metrics["risk_loss_weight"] = 1.0 if freeze_segmentation else float(lambda_u)
+    metrics["freeze_segmentation"] = float(freeze_segmentation)
+    metrics["probability_disagreement_scale"] = float(model.probability_disagreement_scale)
     for index, group in enumerate(optimizer.param_groups):
         metrics[f"learning_rate_group_{index}"] = float(group["lr"])
     return metrics
@@ -304,7 +338,7 @@ def validate(
     calibrated: bool,
     uncertainty_output_dir: Path | None = None,
     epoch: int = 0,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     from monai.metrics import DiceMetric
     from monai.utils.enums import MetricReduction
 
@@ -329,7 +363,7 @@ def validate(
     saved_uncertainty_maps: list[Path] = []
     monitoring = config.get("monitoring", {})
     if uncertainty_output_dir is not None and not calibrated:
-        raise ValueError("Uncertainty maps can only be saved after Zernike statistics are fitted")
+        raise ValueError("Uncertainty maps can only be saved during calibration validation")
     for batch_index, batch in enumerate(loader):
         image = batch["image"].to(device, non_blocking=True)
         output = infer_volume(model, image, config, compute_uncertainty=calibrated)
@@ -379,7 +413,6 @@ def validate(
             samples.update(
                 uncertainty=output.uncertainty[:, 0][mask].float().cpu().numpy(),
                 probability_disagreement=output.probability_disagreement[:, 0][mask].float().cpu().numpy(),
-                zernike_disagreement=output.zernike_disagreement[:, 0][mask].float().cpu().numpy(),
             )
         metric_samples.update(**samples)
         del (
@@ -426,7 +459,6 @@ def validate(
     if calibrated:
         uncertainty = metric_samples.values("uncertainty")
         probability_disagreement = metric_samples.values("probability_disagreement")
-        zernike_disagreement = metric_samples.values("zernike_disagreement")
         metrics.update(
             risk_calibration_metrics(
                 uncertainty,
@@ -453,23 +485,23 @@ def validate(
                 "probability_disagreement_mean": float(np.mean(probability_disagreement))
                 if probability_disagreement.size
                 else float("nan"),
-                "zernike_disagreement_mean": float(np.mean(zernike_disagreement))
-                if zernike_disagreement.size
-                else float("nan"),
                 "fusion_eta": float(model.fusion.eta.detach()),
-                "fusion_xi": float(model.fusion.xi.detach()),
                 "fusion_bias": float(model.fusion.bias.detach()),
+                "uncertainty_source": "probability_disagreement",
+                "probability_disagreement_scale": float(model.probability_disagreement_scale),
             }
         )
     if uncertainty_output_dir is not None:
         save_components = bool(monitoring.get("uncertainty_map_components", True))
         keys = ["uncertainty", "error", "base_prediction", "target_atomic", "affine", "epoch"]
         if save_components:
-            keys.extend(["probability_disagreement", "zernike_disagreement"])
+            keys.append("probability_disagreement")
         manifest = {
             "stage": "calibration",
             "epoch": epoch,
             "split": "val",
+            "uncertainty_source": "probability_disagreement",
+            "probability_disagreement_scale": float(model.probability_disagreement_scale),
             "case_count": len(saved_uncertainty_maps),
             "dtype": str(monitoring.get("uncertainty_map_dtype", "float16")),
             "components_saved": save_components,
@@ -480,38 +512,6 @@ def validate(
             json.dump(manifest, stream, indent=2)
         metrics["uncertainty_maps_saved"] = float(len(saved_uncertainty_maps))
     return metrics
-
-
-def fit_zernike_statistics(
-    model: DualHeadSwinUNETR, loader, device: torch.device, config: dict[str, Any]
-) -> dict[str, float]:
-    model.eval()
-    accumulator = WelfordAccumulator(tuple(model.zernike_stats.mean.shape))
-    max_batches = int(config["zernike"].get("stats_max_batches", 0))
-    with torch.no_grad():
-        for index, batch in enumerate(loader):
-            if max_batches and index >= max_batches:
-                break
-            image = batch["image"].to(device, non_blocking=True)
-            output = infer_volume(model, image, config, compute_uncertainty=False)
-            mask = brain_mask(image)
-            for probability in output.head_atomic_probabilities:
-                for start, stop, descriptor in model.zernike.iter_descriptors(probability):
-                    accumulator.update(descriptor, mask[:, :, start:stop])
-            print(f"zernike statistics batch {index + 1}/{len(loader)}", flush=True)
-    mean, std, count = accumulator.finalize()
-    model.zernike_stats.set_values(mean.to(device), std.to(device), count.to(device))
-    return {
-        "mean_min": float(mean.min()),
-        "mean_max": float(mean.max()),
-        "std_min": float(std.min()),
-        "std_max": float(std.max()),
-        "count_min": float(count.min()),
-        "count_max": float(count.max()),
-        "mean_nonfinite": float((~torch.isfinite(mean)).sum()),
-        "std_nonfinite": float((~torch.isfinite(std)).sum()),
-        "zero_or_negative_std": float((std <= 0).sum()),
-    }
 
 
 @torch.no_grad()
@@ -545,6 +545,11 @@ def _load_required(path: Path, model: DualHeadSwinUNETR) -> dict[str, Any]:
 
 
 def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Path:
+    if stage == "stats":
+        raise ValueError(
+            "The stats stage is disabled because geometric disagreement is no longer used; "
+            "start calibration directly from a warm-up checkpoint"
+        )
     seed = int(config["reproducibility"]["seed"])
     set_reproducibility(seed, bool(config["reproducibility"].get("deterministic", True)))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -565,16 +570,13 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
     model = DualHeadSwinUNETR(config).to(device)
     loss_function = RegionDiceLoss()
     train_loader = build_loader(config, "train", "train")
-    stats_loader = build_loader(config, "train", "stats")
     val_loader = build_loader(config, "val", "eval")
     telemetry.event(
         "dataloaders_ready",
         train_batches=len(train_loader),
-        stats_batches=len(stats_loader),
         validation_batches=len(val_loader),
     )
     best_seg_path = run_dir / "best_seg.pt"
-    stats_path = run_dir / "stats_fitted.pt"
     calibrated_path = run_dir / "best_calibrated.pt"
 
     if stage in ("warmup", "all"):
@@ -653,36 +655,29 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                     )
         telemetry.event("stage_finished", stage="warmup", best_mean_dice=best_dice)
 
-    if stage in ("stats", "all"):
-        telemetry.event("stage_started", stage="stats")
-        source = Path(checkpoint) if checkpoint and stage == "stats" else best_seg_path
-        best_payload = _load_required(source, model)
-        zernike_health = fit_zernike_statistics(model, stats_loader, device, config)
-        torch.save(
-            {
-                "mean": model.zernike_stats.mean.detach().cpu(),
-                "std": model.zernike_stats.std.detach().cpu(),
-                "count": model.zernike_stats.count.detach().cpu(),
-            },
-            run_dir / "zernike_statistics.pt",
-        )
-        save_checkpoint(stats_path, model, "stats", int(best_payload.get("epoch", -1)), config, metrics=best_payload.get("metrics"))
-        telemetry.event(
-            "stage_finished",
-            stage="stats",
-            source_checkpoint=str(source),
-            statistics=zernike_health,
-            checkpoint=str(stats_path),
-        )
-
     if stage in ("calibration", "all"):
-        telemetry.event("stage_started", stage="calibration")
-        source = Path(checkpoint) if checkpoint and stage == "calibration" else stats_path
-        stats_payload = _load_required(source, model)
-        reference_dice = float(stats_payload.get("metrics", {}).get("mean_dice", -math.inf))
+        source = Path(checkpoint) if checkpoint and stage == "calibration" else best_seg_path
+        source_payload = _load_required(source, model)
+        reference_dice = float(source_payload.get("metrics", {}).get("mean_dice", -math.inf))
+        freeze_segmentation = bool(
+            config["training"].get("freeze_segmentation_during_calibration", True)
+        )
+        segmentation_sha256_before = segmentation_state_sha256(model)
+        calibration_parameters = configure_calibration_trainability(model, freeze_segmentation)
+        telemetry.event(
+            "stage_started",
+            stage="calibration",
+            source_checkpoint=str(source.resolve()),
+            source_stage=source_payload.get("stage"),
+            source_epoch=source_payload.get("epoch"),
+            uncertainty_source="probability_disagreement",
+            probability_disagreement_scale=model.probability_disagreement_scale,
+            freeze_segmentation=freeze_segmentation,
+            segmentation_sha256_before=segmentation_sha256_before,
+        )
         epochs = int(config["training"]["calibration_epochs"])
         optimizer = torch.optim.AdamW(
-            model.parameters(),
+            calibration_parameters,
             lr=float(config["training"]["calibration_learning_rate"]),
             weight_decay=float(config["training"]["weight_decay"]),
         )
@@ -693,7 +688,11 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
         last_path = run_dir / "last_calibration.pt"
         target_lambda = float(config["uncertainty"].get("lambda_u", 0.1))
         for epoch in range(epochs):
-            lambda_u = target_lambda * float(epoch) / max(epochs - 1, 1)
+            lambda_u = (
+                1.0
+                if freeze_segmentation
+                else target_lambda * float(epoch) / max(epochs - 1, 1)
+            )
             train_metrics = train_epoch(
                 model,
                 train_loader,
@@ -706,6 +705,7 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                 telemetry=telemetry,
                 stage="calibration",
                 epoch=epoch + 1,
+                freeze_segmentation=freeze_segmentation,
             )
             scheduler.step()
             telemetry.epoch_finished(
@@ -729,6 +729,12 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                     epoch=epoch + 1,
                 )
                 metrics["lambda_u"] = lambda_u
+                metrics["risk_loss_weight"] = 1.0 if freeze_segmentation else lambda_u
+                metrics["freeze_segmentation"] = freeze_segmentation
+                metrics["calibration_input"] = (
+                    "same_unaugmented_image" if freeze_segmentation else "dual_augmented_views"
+                )
+                metrics["segmentation_sha256_before"] = segmentation_sha256_before
                 print(f"calibration epoch={epoch + 1} train={train_metrics} val={metrics}")
                 telemetry.validation_finished("calibration", epoch + 1, metrics)
                 if map_dir is not None:
@@ -771,11 +777,26 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             optimizer.load_state_dict(calibrated_payload["optimizer"])
         if "scheduler" in calibrated_payload:
             scheduler.load_state_dict(calibrated_payload["scheduler"])
+        segmentation_sha256_after = segmentation_state_sha256(model)
+        if freeze_segmentation and segmentation_sha256_after != segmentation_sha256_before:
+            raise RuntimeError(
+                "Frozen segmentation weights changed during calibration: "
+                f"{segmentation_sha256_before} != {segmentation_sha256_after}"
+            )
         z0 = fit_z0(model, val_loader, device, config)
         telemetry.event("z0_fitted", value=z0, source="validation")
         final_path = run_dir / "final.pt"
         final_metrics = dict(calibrated_payload.get("metrics", {}))
-        final_metrics["z0"] = z0
+        final_metrics.update(
+            {
+                "z0": z0,
+                "uncertainty_source": "probability_disagreement",
+                "probability_disagreement_scale": model.probability_disagreement_scale,
+                "freeze_segmentation": freeze_segmentation,
+                "segmentation_sha256_before": segmentation_sha256_before,
+                "segmentation_sha256_after": segmentation_sha256_after,
+            }
+        )
         save_checkpoint(
             final_path,
             model,
@@ -787,16 +808,23 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             metrics=final_metrics,
         )
         print(f"fitted Z0={z0:.6f}; final checkpoint={final_path}")
-        telemetry.event("stage_finished", stage="calibration", best_risk_ece=best_risk_ece)
+        telemetry.event(
+            "stage_finished",
+            stage="calibration",
+            best_risk_ece=best_risk_ece,
+            segmentation_sha256_before=segmentation_sha256_before,
+            segmentation_sha256_after=segmentation_sha256_after,
+            segmentation_unchanged=segmentation_sha256_before == segmentation_sha256_after,
+        )
         telemetry.close("completed", artifact=str(final_path))
         return final_path
-    artifact = stats_path if stage == "stats" else best_seg_path
+    artifact = best_seg_path
     telemetry.close("completed", artifact=str(artifact))
     return artifact
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Three-stage dual-head Swin UNETR training.")
+    parser = argparse.ArgumentParser(description="Warm-up and probability-risk calibration training.")
     parser.add_argument("--config", default=str(Path(__file__).with_name("configs") / "brats2020.yaml"))
     parser.add_argument("--stage", choices=("warmup", "stats", "calibration", "all"), default="all")
     parser.add_argument("--checkpoint", default=None)
