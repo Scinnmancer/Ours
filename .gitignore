@@ -1,0 +1,49 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Virtual environments and local environment files
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Test, coverage, and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Logs, local processes, and editor/OS files
+*.log
+*.pid
+.DS_Store
+.vscode/
+.idea/
+
+# Training outputs, checkpoints, metrics, and generated uncertainty maps
+runs/
+outputs/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.npz
+*.npy
+
+# Local datasets and generated data; keep versioned split metadata
+data/*
+!data/splits/
+!data/splits/**
+
+# Experiment and notebook artifacts
+wandb/
+mlruns/
+.ipynb_checkpoints/

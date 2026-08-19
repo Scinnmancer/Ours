@@ -1,0 +1,92 @@
+experiment: dual_swin_zernike_brats2020
+
+paths:
+  data_root: /root/autodl-tmp/archive
+  split_json: ../data/splits/brats2020_reliability.json
+  run_root: ../runs
+  baseline_checkpoint: ../../baseline/runs/brats2020_200ep/model.pt
+
+data:
+  train_center: TCIA
+  val_fraction: 0.2
+  roi_size: [128, 128, 128]
+  workers: 8
+  debug_cases: 0
+  flip_probability: 0.2
+  scale_probability: 0.1
+  shift_probability: 0.1
+  spacing_tolerance: 0.05
+  resample:
+    enabled: false
+    spacing: [1.0, 1.0, 1.0]
+
+model:
+  in_channels: 4
+  region_channels: 3
+  output_mode: independent_sigmoid
+  feature_size: 48
+  dropout_rate: 0.0
+  attention_dropout_rate: 0.0
+  dropout_path_rate: 0.0
+  head_dropout_rates: [0.1, 0.1]
+  use_checkpoint: true
+  encoder_warm_start: true
+
+zernike:
+  windows: [3, 5, 7]
+  orders: [[0, 0], [1, 1], [2, 0], [2, 2]]
+  chunk_depth: 32
+  stats_max_batches: 0
+
+uncertainty:
+  eta_init: 1.0
+  xi_init: 1.0
+  bias_init: -2.0
+  lambda_u: 0.1
+  max_balanced_samples: 65536
+
+label_transfer:
+  radius: 2
+  sigma: 1.0
+  gamma: 2.0
+  alpha_max: 0.35
+  beta: 2.0
+  iterations: 3
+  z0_quantile: 0.5
+
+training:
+  batch_size: 1
+  warmup_epochs: 150
+  calibration_epochs: 50
+  validation_every: 5
+  learning_rate: 0.0001
+  calibration_learning_rate: 0.00001
+  weight_decay: 0.00001
+  scheduler_warmup_epochs: 20
+  amp: true
+  sw_batch_size: 4
+  infer_overlap: 0.5
+  dice_tolerance: 0.01
+
+evaluation:
+  splits: [val, test_CBICA, test_2013, test_TMC]
+  workers: 0
+  max_metric_voxels: 200000
+  calibration_bins: 15
+  high_confidence_threshold: 0.95
+  save_nifti: false
+
+monitoring:
+  enabled: true
+  hash_baseline_checkpoint: true
+  batch_interval: 0
+  gradient_interval: 10
+  uncertainty_map_every: 10
+  uncertainty_map_dtype: float16
+  uncertainty_map_components: true
+  plateau_patience_validations: 10
+  memory_multiplier_limit: 3.0
+
+reproducibility:
+  seed: 2026
+  deterministic: true
