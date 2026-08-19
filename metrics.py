@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import numpy as np
 import torch
 
-from .probability import atomic_to_regions, scalar_to_atomic, scalar_to_regions
+from .probability import atomic_to_regions
 
 
 class MetricSampleReservoir:
@@ -80,12 +79,53 @@ def dice_per_region(prediction: np.ndarray, target: np.ndarray) -> list[float]:
 
 
 def hd95_per_region(prediction: np.ndarray, target: np.ndarray) -> list[float]:
-    from monai.metrics.hausdorff_distance import compute_hausdorff_distance
+    """Compute symmetric HD95 without retaining dense distances for all regions.
 
-    pred = torch.as_tensor(prediction[None].astype(np.uint8))
-    truth = torch.as_tensor(target[None].astype(np.uint8))
-    values = compute_hausdorff_distance(pred, truth, include_background=True, percentile=95)[0]
-    return [float(item) if math.isfinite(float(item)) else float("nan") for item in values]
+    MONAI's batched implementation is convenient, but a pathological full-volume
+    prediction can make its temporary distance tensors the evaluation memory
+    high-water mark. Crop each region to the union of prediction and target and
+    compute the two directed surface distances sequentially instead.
+    """
+    from scipy.ndimage import binary_erosion, distance_transform_edt, generate_binary_structure
+
+    if prediction.shape != target.shape or prediction.ndim != 4:
+        raise ValueError("HD95 inputs must have equal [C,D,H,W] shapes")
+
+    structure = generate_binary_structure(3, 1)
+    values: list[float] = []
+    for channel in range(prediction.shape[0]):
+        pred_source = np.asarray(prediction[channel])
+        truth_source = np.asarray(target[channel])
+        if not pred_source.any() or not truth_source.any():
+            values.append(float("nan"))
+            continue
+
+        union = (pred_source != 0) | (truth_source != 0)
+        bounds: list[slice] = []
+        for axis in range(3):
+            occupied = np.any(union, axis=tuple(item for item in range(3) if item != axis))
+            indices = np.flatnonzero(occupied)
+            bounds.append(slice(int(indices[0]), int(indices[-1]) + 1))
+        crop = tuple(bounds)
+        pred = pred_source[crop].astype(bool, copy=False)
+        truth = truth_source[crop].astype(bool, copy=False)
+        del union
+
+        pred_surface = pred ^ binary_erosion(pred, structure=structure, border_value=0)
+        truth_surface = truth ^ binary_erosion(truth, structure=structure, border_value=0)
+        del pred, truth
+
+        distance = distance_transform_edt(~truth_surface)
+        pred_to_truth = distance[pred_surface]
+        del distance
+        distance = distance_transform_edt(~pred_surface)
+        truth_to_pred = distance[truth_surface]
+        del distance, pred_surface, truth_surface
+
+        # Match MONAI's symmetric Hausdorff definition: take the percentile
+        # independently in each direction, then the larger directed value.
+        values.append(float(max(np.percentile(pred_to_truth, 95), np.percentile(truth_to_pred, 95))))
+    return values
 
 
 def expected_calibration_error(confidence: np.ndarray, correct: np.ndarray, bins: int = 15) -> float:
@@ -180,12 +220,110 @@ def prediction_rejection_ratio(confidence: np.ndarray, correct: np.ndarray) -> f
     return float((_rejection_auc(confidence, correct) - random_auc) / denominator * 100.0)
 
 
+def _sample_mask_indices(mask: torch.Tensor, max_voxels: int) -> torch.Tensor:
+    """Return deterministic flat indices while bounding downstream metric arrays."""
+    if max_voxels <= 0:
+        raise ValueError("max_voxels must be positive")
+    flat = mask.reshape(-1)
+    count = int(flat.sum())
+    if count <= max_voxels:
+        return torch.nonzero(flat, as_tuple=False).squeeze(1)
+
+    # Select evenly spaced foreground ranks without first materializing every
+    # foreground index (which alone can be ~68 MiB for a full BraTS volume).
+    ranks = torch.linspace(0, count - 1, max_voxels, dtype=torch.float64).long()
+    selected: list[torch.Tensor] = []
+    cursor = 0
+    seen = 0
+    chunk_size = 1_000_000
+    for start in range(0, flat.numel(), chunk_size):
+        local = torch.nonzero(flat[start : start + chunk_size], as_tuple=False).squeeze(1)
+        next_seen = seen + local.numel()
+        next_cursor = int(torch.searchsorted(ranks, torch.tensor(next_seen), right=False))
+        if next_cursor > cursor:
+            selected.append(local[ranks[cursor:next_cursor] - seen] + start)
+            cursor = next_cursor
+        seen = next_seen
+        if cursor == max_voxels:
+            break
+    return torch.cat(selected)
+
+
+def _full_probability_aggregates(
+    probability: torch.Tensor,
+    target: torch.Tensor,
+    prediction: torch.Tensor,
+    mask: torch.Tensor,
+    high_confidence_threshold: float,
+) -> tuple[float, float]:
+    """Compute exact Brier/high-confidence metrics with bounded scratch space."""
+    probability = probability.reshape(4, -1)
+    target = target.reshape(-1)
+    prediction = prediction.reshape(-1)
+    mask = mask.reshape(-1)
+    brier_sum = 0.0
+    high_confidence_errors = 0
+    count = 0
+    chunk_size = 1_000_000
+    for start in range(0, mask.numel(), chunk_size):
+        selected = mask[start : start + chunk_size]
+        selected_count = int(selected.sum())
+        if selected_count == 0:
+            continue
+        chunk_probability = probability[:, start : start + chunk_size][:, selected]
+        chunk_target = target[start : start + chunk_size][selected]
+        chunk_prediction = prediction[start : start + chunk_size][selected]
+        brier_values = torch.zeros(selected_count, dtype=torch.float32)
+        for channel in range(4):
+            expected = (chunk_target == channel).to(torch.float32)
+            brier_values.add_((chunk_probability[channel] - expected).square())
+        confidence = torch.amax(chunk_probability, dim=0)
+        high_confidence_errors += int(
+            ((confidence >= high_confidence_threshold) & (chunk_prediction != chunk_target)).sum()
+        )
+        brier_sum += float(brier_values.sum())
+        count += selected_count
+    return brier_sum / count, high_confidence_errors / count
+
+
+def _full_risk_brier(
+    uncertainty: torch.Tensor,
+    target: torch.Tensor,
+    prediction: torch.Tensor,
+    mask: torch.Tensor,
+) -> float:
+    """Compute exact risk Brier score without full-size selected arrays."""
+    uncertainty = uncertainty.reshape(-1)
+    target = target.reshape(-1)
+    prediction = prediction.reshape(-1)
+    mask = mask.reshape(-1)
+    squared_error_sum = 0.0
+    count = 0
+    chunk_size = 1_000_000
+    for start in range(0, mask.numel(), chunk_size):
+        selected = mask[start : start + chunk_size]
+        selected_count = int(selected.sum())
+        if selected_count == 0:
+            continue
+        chunk_uncertainty = uncertainty[start : start + chunk_size][selected].float().clamp(0.0, 1.0)
+        error = (
+            prediction[start : start + chunk_size][selected]
+            != target[start : start + chunk_size][selected]
+        ).to(torch.float32)
+        squared_error_sum += float((chunk_uncertainty - error).square().sum())
+        count += selected_count
+    return squared_error_sum / count
+
+
 def evaluate_case(
     atomic_probability: torch.Tensor,
     uncertainty: torch.Tensor,
     scalar_target: torch.Tensor,
     region_probability: torch.Tensor | None = None,
     risk_reference_probability: torch.Tensor | None = None,
+    atomic_prediction: torch.Tensor | np.ndarray | None = None,
+    region_prediction: torch.Tensor | np.ndarray | None = None,
+    risk_reference_prediction: torch.Tensor | np.ndarray | None = None,
     bins: int = 15,
     max_voxels: int = 200000,
     high_confidence_threshold: float = 0.95,
@@ -198,52 +336,95 @@ def evaluate_case(
         scalar = scalar[0]
     if scalar.ndim == 4 and scalar.shape[0] == 1:
         scalar = scalar[0]
-    atomic_target = scalar_to_atomic(scalar.unsqueeze(0).unsqueeze(0))[0]
-    region_target = scalar_to_regions(scalar.unsqueeze(0).unsqueeze(0))[0].numpy().astype(np.uint8)
-    atomic_prediction = probability.argmax(dim=0)
-    if region_probability is None:
-        region_probability = atomic_to_regions(probability.unsqueeze(0))[0]
+    scalar_values = scalar.numpy()
+    valid = np.isin(scalar_values, (0, 1, 2, 4))
+    if not bool(valid.all()):
+        raise ValueError(f"Invalid BraTS labels: {np.unique(scalar_values[~valid]).tolist()}")
+    scalar_array = scalar_values.astype(np.uint8, copy=False)
+    atomic_target_array = scalar_array.copy()
+    atomic_target_array[atomic_target_array == 4] = 3
+    region_target = np.stack(
+        (
+            (atomic_target_array == 1) | (atomic_target_array == 3),
+            atomic_target_array > 0,
+            atomic_target_array == 3,
+        )
+    ).astype(np.uint8, copy=False)
+
+    if atomic_prediction is None:
+        atomic_prediction_array = probability.argmax(dim=0).to(torch.uint8).numpy()
+    elif isinstance(atomic_prediction, torch.Tensor):
+        atomic_prediction_array = atomic_prediction.detach().cpu().numpy().astype(np.uint8, copy=False)
     else:
-        region_probability = region_probability.detach().float().cpu()
-        if region_probability.ndim == 5:
-            region_probability = region_probability[0]
-        if region_probability.ndim != 4 or region_probability.shape[0] != 3:
-            raise ValueError("region_probability must have shape [3,D,H,W] or [1,3,D,H,W]")
-    region_prediction = (region_probability >= 0.5).numpy().astype(np.uint8)
-    dice = dice_per_region(region_prediction, region_target)
-    hd95 = hd95_per_region(region_prediction, region_target)
-    mask = (atomic_target > 0) | (atomic_prediction > 0)
+        atomic_prediction_array = np.asarray(atomic_prediction, dtype=np.uint8)
+    if atomic_prediction_array.shape != atomic_target_array.shape:
+        raise ValueError("atomic_prediction must match the scalar target shape")
+
+    if region_prediction is None:
+        if region_probability is None:
+            region_probability = atomic_to_regions(probability.unsqueeze(0))[0]
+        else:
+            region_probability = region_probability.detach().cpu()
+            if region_probability.ndim == 5:
+                region_probability = region_probability[0]
+            if region_probability.ndim != 4 or region_probability.shape[0] != 3:
+                raise ValueError("region_probability must have shape [3,D,H,W] or [1,3,D,H,W]")
+        region_prediction_array = (region_probability >= 0.5).numpy().astype(np.uint8)
+    elif isinstance(region_prediction, torch.Tensor):
+        region_prediction_array = region_prediction.detach().cpu().numpy().astype(np.uint8, copy=False)
+    else:
+        region_prediction_array = np.asarray(region_prediction, dtype=np.uint8)
+    if region_prediction_array.shape != region_target.shape:
+        raise ValueError("region_prediction must match the [3,D,H,W] region target shape")
+
+    dice = dice_per_region(region_prediction_array, region_target)
+    hd95 = hd95_per_region(region_prediction_array, region_target)
+    atomic_target = torch.as_tensor(atomic_target_array, dtype=torch.uint8)
+    atomic_prediction_tensor = torch.as_tensor(atomic_prediction_array, dtype=torch.uint8)
+    mask = (atomic_target > 0) | (atomic_prediction_tensor > 0)
     if not bool(mask.any()):
         mask = torch.ones_like(mask, dtype=torch.bool)
-    confidence = probability.max(dim=0).values[mask].numpy()
-    correct = (atomic_prediction[mask] == atomic_target[mask]).numpy().astype(np.float32)
+    metric_indices = _sample_mask_indices(mask, max_voxels)
+    sampled_probability = probability.reshape(4, -1)[:, metric_indices]
+    sampled_target = atomic_target.reshape(-1)[metric_indices]
+    sampled_prediction = atomic_prediction_tensor.reshape(-1)[metric_indices]
+    confidence = torch.amax(sampled_probability, dim=0).numpy()
+    correct = (sampled_prediction == sampled_target).numpy().astype(np.float32)
     error = 1.0 - correct
-    risk_probability = atomic_probability if risk_reference_probability is None else risk_reference_probability
-    risk_probability = risk_probability.detach().float().cpu()
-    if risk_probability.ndim == 5:
-        risk_probability = risk_probability[0]
-    risk_prediction = risk_probability.argmax(dim=0)
+    brier, high_confidence_error = _full_probability_aggregates(
+        probability,
+        atomic_target,
+        atomic_prediction_tensor,
+        mask,
+        high_confidence_threshold,
+    )
+    if risk_reference_prediction is not None:
+        if isinstance(risk_reference_prediction, torch.Tensor):
+            risk_prediction = risk_reference_prediction.detach().cpu().to(torch.uint8)
+        else:
+            risk_prediction = torch.as_tensor(risk_reference_prediction, dtype=torch.uint8)
+    else:
+        risk_probability = atomic_probability if risk_reference_probability is None else risk_reference_probability
+        risk_probability = risk_probability.detach().float().cpu()
+        if risk_probability.ndim == 5:
+            risk_probability = risk_probability[0]
+        risk_prediction = risk_probability.argmax(dim=0).to(torch.uint8)
+    if risk_prediction.shape != atomic_target.shape:
+        raise ValueError("risk_reference_prediction must match the scalar target shape")
     risk_mask = (atomic_target > 0) | (risk_prediction > 0)
     if not bool(risk_mask.any()):
         risk_mask = torch.ones_like(risk_mask, dtype=torch.bool)
-    risk_correct = (risk_prediction[risk_mask] == atomic_target[risk_mask]).numpy().astype(np.float32)
-    uncertainty_values = uncertainty.detach().float().cpu()
-    if uncertainty_values.ndim == 5:
-        uncertainty_values = uncertainty_values[0, 0]
-    elif uncertainty_values.ndim == 4:
-        uncertainty_values = uncertainty_values[0]
-    uncertainty_values = uncertainty_values[risk_mask].numpy()
-    risk_brier = risk_calibration_metrics(uncertainty_values, risk_correct, bins)["risk_brier"]
-    target_one_hot = torch.nn.functional.one_hot(atomic_target.long(), num_classes=4).movedim(-1, 0).float()
-    brier = float(((probability[:, mask] - target_one_hot[:, mask]) ** 2).sum(dim=0).mean())
-    high_confidence_error = float(np.mean((confidence >= high_confidence_threshold) & (error > 0.5)))
-    if confidence.size > max_voxels:
-        indices = np.linspace(0, confidence.size - 1, max_voxels).astype(np.int64)
-        confidence, correct, error = (values[indices] for values in (confidence, correct, error))
-    if uncertainty_values.size > max_voxels:
-        risk_indices = np.linspace(0, uncertainty_values.size - 1, max_voxels).astype(np.int64)
-        uncertainty_values = uncertainty_values[risk_indices]
-        risk_correct = risk_correct[risk_indices]
+    uncertainty_map = uncertainty.detach().cpu()
+    if uncertainty_map.ndim == 5:
+        uncertainty_map = uncertainty_map[0, 0]
+    elif uncertainty_map.ndim == 4:
+        uncertainty_map = uncertainty_map[0]
+    risk_brier = _full_risk_brier(uncertainty_map, atomic_target, risk_prediction, risk_mask)
+    risk_indices = _sample_mask_indices(risk_mask, max_voxels)
+    risk_correct = (
+        risk_prediction.reshape(-1)[risk_indices] == atomic_target.reshape(-1)[risk_indices]
+    ).numpy().astype(np.float32)
+    uncertainty_values = uncertainty_map.reshape(-1)[risk_indices].float().numpy()
     risk_error = 1.0 - risk_correct
     risk_metrics = risk_calibration_metrics(uncertainty_values, risk_correct, bins)
     risk_metrics["risk_brier"] = risk_brier

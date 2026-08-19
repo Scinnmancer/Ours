@@ -16,7 +16,7 @@ from .data import build_loader
 from .inference import infer_volume
 from .metrics import evaluate_case
 from .model import DualHeadSwinUNETR
-from .probability import atomic_label_to_scalar, atomic_to_regions
+from .probability import atomic_label_to_scalar
 from .reproducibility import save_run_metadata, set_reproducibility
 
 
@@ -95,10 +95,24 @@ def _summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return summaries
 
 
-def _required_cpu_tensor(value: torch.Tensor | None, name: str) -> torch.Tensor:
+def _required_cpu_tensor(value: torch.Tensor | None, name: str, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     if value is None:
         raise RuntimeError(f"Evaluation output is missing {name}")
-    return value.detach().to(device="cpu", dtype=torch.float32)
+    return value.detach().to(device="cpu", dtype=dtype)
+
+
+def _atomic_prediction(probability: torch.Tensor) -> torch.Tensor:
+    return probability.argmax(dim=1)[0].to(torch.uint8)
+
+
+def _region_prediction_from_atomic(probability: torch.Tensor) -> torch.Tensor:
+    if probability.ndim != 5 or probability.shape[:2] != (1, 4):
+        raise ValueError("Atomic probability must have shape [1,4,D,H,W]")
+    atomic = probability[0]
+    tc = (atomic[1] + atomic[3]) >= 0.5
+    wt = (atomic[1] + atomic[2] + atomic[3]) >= 0.5
+    et = atomic[3] >= 0.5
+    return torch.stack((tc, wt, et)).to(torch.uint8)
 
 
 def _evaluate_batch(
@@ -117,38 +131,60 @@ def _evaluate_batch(
     case = _case_name(batch, index)
     affine = _affine(batch) if bool(evaluation.get("save_nifti", False)) else None
 
-    # Keep only what the metrics need and move it off the accelerator before
-    # CPU metric computation. DualHeadOutput also owns logits, both heads and
-    # disagreement maps, which otherwise remain live for the whole case.
-    base_region_probability = _required_cpu_tensor(result.base_region_probability, "base region probability")
+    # Evaluate base before transferring refined probabilities. This prevents
+    # two full four-channel volumes from residing in host memory together.
+    base_region_prediction = _required_cpu_tensor(
+        result.base_region_probability >= 0.5, "base region prediction", torch.uint8
+    )[0]
     base_atomic_probability = _required_cpu_tensor(result.base_atomic_probability, "base atomic probability")
-    refined_atomic_probability = _required_cpu_tensor(
-        result.refined_atomic_probability, "refined atomic probability"
-    )
-    refined_region_probability = atomic_to_regions(refined_atomic_probability)
     uncertainty = _required_cpu_tensor(result.uncertainty, "uncertainty")
+    base_atomic_prediction = _atomic_prediction(base_atomic_probability)
+    refined_atomic_device = result.refined_atomic_probability
+    if refined_atomic_device is None:
+        raise RuntimeError("Evaluation output is missing refined atomic probability")
     del result, image
+    if device.type == "cuda" and bool(evaluation.get("release_cuda_cache", True)):
+        torch.cuda.empty_cache()
 
-    case_rows: list[dict[str, Any]] = []
-    for prediction_name, probability, region_probability in (
-        ("base", base_atomic_probability, base_region_probability),
-        ("refined", refined_atomic_probability, refined_region_probability),
-    ):
-        metrics = evaluate_case(
-            probability,
-            uncertainty,
-            batch["label_scalar"],
-            region_probability=region_probability,
-            risk_reference_probability=base_atomic_probability,
-            bins=int(evaluation.get("calibration_bins", 15)),
-            max_voxels=int(evaluation.get("max_metric_voxels", 200000)),
-            high_confidence_threshold=float(evaluation.get("high_confidence_threshold", 0.95)),
-        )
-        case_rows.append({"domain": domain, "prediction": prediction_name, "case": case, **metrics})
-        print(f"{domain} {index + 1}/{batch_count} {case} {prediction_name} dice={metrics['mean_dice']:.4f}")
+    metric_options = {
+        "bins": int(evaluation.get("calibration_bins", 15)),
+        "max_voxels": int(evaluation.get("max_metric_voxels", 200000)),
+        "high_confidence_threshold": float(evaluation.get("high_confidence_threshold", 0.95)),
+    }
+    base_metrics = evaluate_case(
+        base_atomic_probability,
+        uncertainty,
+        batch["label_scalar"],
+        atomic_prediction=base_atomic_prediction,
+        region_prediction=base_region_prediction,
+        risk_reference_prediction=base_atomic_prediction,
+        **metric_options,
+    )
+    case_rows: list[dict[str, Any]] = [
+        {"domain": domain, "prediction": "base", "case": case, **base_metrics}
+    ]
+    print(f"{domain} {index + 1}/{batch_count} {case} base dice={base_metrics['mean_dice']:.4f}")
+    del base_atomic_probability, base_region_prediction, base_metrics
+
+    refined_atomic_probability = _required_cpu_tensor(refined_atomic_device, "refined atomic probability")
+    del refined_atomic_device
+    refined_atomic_prediction = _atomic_prediction(refined_atomic_probability)
+    refined_region_prediction = _region_prediction_from_atomic(refined_atomic_probability)
+    if device.type == "cuda" and bool(evaluation.get("release_cuda_cache", True)):
+        torch.cuda.empty_cache()
+    refined_metrics = evaluate_case(
+        refined_atomic_probability,
+        uncertainty,
+        batch["label_scalar"],
+        atomic_prediction=refined_atomic_prediction,
+        region_prediction=refined_region_prediction,
+        risk_reference_prediction=base_atomic_prediction,
+        **metric_options,
+    )
+    case_rows.append({"domain": domain, "prediction": "refined", "case": case, **refined_metrics})
+    print(f"{domain} {index + 1}/{batch_count} {case} refined dice={refined_metrics['mean_dice']:.4f}")
     if bool(evaluation.get("save_nifti", False)):
-        label = refined_atomic_probability.argmax(dim=1)[0]
-        scalar = atomic_label_to_scalar(label).numpy().astype(np.uint8)
+        scalar = atomic_label_to_scalar(refined_atomic_prediction).numpy().astype(np.uint8)
         prediction_dir = output / "nifti" / domain
         prediction_dir.mkdir(parents=True, exist_ok=True)
         nib.save(nib.Nifti1Image(scalar, affine), prediction_dir / f"{case}.nii.gz")
@@ -174,6 +210,7 @@ def run_evaluation(config: dict[str, Any], checkpoint: str, output_dir: str | No
             stream,
             indent=2,
         )
+    del payload
     rows: list[dict[str, Any]] = []
     evaluation = config["evaluation"]
     for split in evaluation["splits"]:
