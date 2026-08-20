@@ -119,12 +119,6 @@ class DualHeadSwinUNETR(nn.Module):
             xi=float(u_cfg.get("xi_init", 1.0)),
             bias=float(u_cfg.get("bias_init", -2.0)),
         )
-        # This is deliberately a plain configuration value rather than a
-        # parameter/buffer so legacy warm-up state_dicts remain strict-load
-        # compatible.
-        self.probability_disagreement_scale = float(
-            u_cfg.get("probability_disagreement_scale", 1.0)
-        )
         t_cfg = config["label_transfer"]
         self.label_transfer = UncertaintyGatedLabelTransfer(
             radius=int(t_cfg.get("radius", 2)),
@@ -173,14 +167,13 @@ class DualHeadSwinUNETR(nn.Module):
             base_atomic_probability=base,
         )
         if compute_uncertainty:
-            p_disagreement, uncertainty = uncertainty_components(
-                atomic1,
-                atomic2,
+            z_disagreement = self.zernike.disagreement(atomic1, atomic2, self.zernike_stats)
+            z_disagreement, uncertainty = uncertainty_components(
+                z_disagreement,
                 self.fusion,
-                probability_disagreement_scale=self.probability_disagreement_scale,
             )
-            result.probability_disagreement = p_disagreement
-            result.zernike_disagreement = None
+            result.probability_disagreement = None
+            result.zernike_disagreement = z_disagreement
             result.uncertainty = uncertainty
             if refine:
                 result.refined_atomic_probability = self.label_transfer(base, uncertainty)

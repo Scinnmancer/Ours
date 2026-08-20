@@ -1,21 +1,16 @@
 from __future__ import annotations
 
-import copy
-
 import numpy as np
-import pytest
 import torch
 import torch.nn as nn
 
 from ours.checkpoint import load_checkpoint, save_checkpoint
-from ours.config import validate_config
 from ours.model import DualHeadOutput, DualHeadSwinUNETR
-from ours.probability import independent_logits_to_atomic, independent_logits_to_regions, jensen_shannon_divergence
+from ours.probability import independent_logits_to_atomic, independent_logits_to_regions
 from ours.train import (
     _make_scaler,
     _save_uncertainty_batch,
     configure_calibration_trainability,
-    run,
     segmentation_state_sha256,
     train_epoch,
 )
@@ -38,7 +33,6 @@ def _config() -> dict:
             "eta_init": 1.0,
             "xi_init": 1.0,
             "bias_init": -2.0,
-            "probability_disagreement_scale": 15.0,
             "max_balanced_samples": 128,
         },
         "label_transfer": {"radius": 1, "sigma": 1.0, "alpha_max": 0.2},
@@ -77,45 +71,41 @@ def _tiny_dual_head(monkeypatch) -> DualHeadSwinUNETR:
     return DualHeadSwinUNETR(_config())
 
 
-def test_probability_only_fusion_uses_configured_scale_and_ignores_legacy_xi():
+def test_geometric_only_fusion_uses_xi_and_ignores_legacy_eta():
     fusion = UncertaintyFusion(eta=1.0, xi=1.0, bias=-2.0)
-    disagreement = torch.tensor([[[[[0.02]]]]])
-    first = fusion(disagreement, torch.zeros_like(disagreement), 15.0)
+    disagreement = torch.tensor([[[[[0.2]]]]])
+    first = fusion(disagreement)
     with torch.no_grad():
-        fusion.raw_xi.add_(20.0)
-    second = fusion(disagreement, torch.full_like(disagreement, 100.0), 15.0)
-    expected = torch.sigmoid(fusion.bias + fusion.eta * disagreement * 15.0)
+        fusion.raw_eta.add_(20.0)
+    second = fusion(disagreement)
+    expected = torch.sigmoid(fusion.bias + fusion.xi * disagreement)
 
     torch.testing.assert_close(first, expected)
     torch.testing.assert_close(second, expected)
     assert bool(((first >= 0.0) & (first <= 1.0)).all())
 
 
-def test_model_uncertainty_path_never_calls_zernike(monkeypatch):
+def test_model_uncertainty_path_uses_zernike_and_does_not_compute_js(monkeypatch):
     model = _tiny_dual_head(monkeypatch)
+    expected_z = torch.full((1, 1, 4, 4, 4), 0.25)
+    calls = []
 
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("Zernike disagreement must remain inactive")
+    def geometric_disagreement(atomic1, atomic2, statistics):
+        calls.append((atomic1, atomic2, statistics))
+        return expected_z
 
-    monkeypatch.setattr(model.zernike, "disagreement", fail_if_called)
+    monkeypatch.setattr(model.zernike, "disagreement", geometric_disagreement)
     logits1 = torch.randn(1, 3, 4, 4, 4)
     logits2 = torch.randn(1, 3, 4, 4, 4)
     result = model.output_from_logits(logits1, logits2, compute_uncertainty=True)
 
-    expected_js = jensen_shannon_divergence(
-        independent_logits_to_atomic(logits1),
-        independent_logits_to_atomic(logits2),
-    )
-    expected_u = model.fusion(
-        expected_js,
-        probability_disagreement_scale=model.probability_disagreement_scale,
-    )
-    assert result.zernike_disagreement is None
-    torch.testing.assert_close(result.probability_disagreement, expected_js)
-    torch.testing.assert_close(result.uncertainty, expected_u)
+    assert len(calls) == 1
+    assert result.probability_disagreement is None
+    torch.testing.assert_close(result.zernike_disagreement, expected_z)
+    torch.testing.assert_close(result.uncertainty, model.fusion(expected_z))
 
 
-def test_legacy_warmup_state_dict_loads_strictly_without_overwriting_scale(monkeypatch, tmp_path):
+def test_existing_warmup_state_dict_still_loads_strictly(monkeypatch, tmp_path):
     legacy = _tiny_dual_head(monkeypatch)
     path = tmp_path / "legacy_warmup.pt"
     save_checkpoint(path, legacy, "warmup", 4, _config(), metrics={"mean_dice": 0.7})
@@ -124,7 +114,6 @@ def test_legacy_warmup_state_dict_loads_strictly_without_overwriting_scale(monke
     payload = load_checkpoint(path, current, strict=True)
 
     assert payload["stage"] == "warmup"
-    assert current.probability_disagreement_scale == 15.0
     assert current.state_dict().keys() == legacy.state_dict().keys()
 
 
@@ -135,7 +124,6 @@ class _RiskOnlyToyModel(nn.Module):
         super().__init__()
         self.segmenter = nn.Conv3d(1, 3, 1)
         self.fusion = UncertaintyFusion()
-        self.probability_disagreement_scale = 15.0
         self.observed_training = None
         self.observed_second_view = None
 
@@ -156,12 +144,9 @@ class _RiskOnlyToyModel(nn.Module):
             base_atomic_probability=base,
         )
         if compute_uncertainty:
-            disagreement = jensen_shannon_divergence(atomic1, atomic2)
-            result.probability_disagreement = disagreement
-            result.uncertainty = self.fusion(
-                disagreement,
-                probability_disagreement_scale=self.probability_disagreement_scale,
-            )
+            disagreement = (atomic1 - atomic2).abs().mean(dim=1, keepdim=True) + 0.1
+            result.zernike_disagreement = disagreement
+            result.uncertainty = self.fusion(disagreement)
         return result
 
 
@@ -181,13 +166,9 @@ def _toy_batch():
     }
 
 
-@pytest.mark.parametrize(
-    ("freeze", "expected_training", "expects_second_view"),
-    [(True, False, False), (False, True, True)],
-)
-def test_calibration_view_and_dropout_mode(freeze, expected_training, expects_second_view):
+def test_frozen_calibration_uses_same_image_and_only_trains_xi_and_bias():
     model = _RiskOnlyToyModel()
-    parameters = configure_calibration_trainability(model, freeze)
+    parameters = configure_calibration_trainability(model, True)
     optimizer = torch.optim.AdamW(parameters, lr=1e-3)
     before = segmentation_state_sha256(model)
     train_epoch(
@@ -198,43 +179,38 @@ def test_calibration_view_and_dropout_mode(freeze, expected_training, expects_se
         torch.device("cpu"),
         _ZeroSegmentationLoss(),
         _config(),
-        lambda_u=1.0 if freeze else 0.1,
+        lambda_u=1.0,
         stage="calibration",
         epoch=1,
-        freeze_segmentation=freeze,
+        freeze_segmentation=True,
     )
 
-    assert model.observed_training is expected_training
-    assert (model.observed_second_view is not None) is expects_second_view
-    if freeze:
-        assert segmentation_state_sha256(model) == before
-        assert {name for name, parameter in model.named_parameters() if parameter.requires_grad} == {
-            "fusion.raw_eta",
-            "fusion.bias",
-        }
+    assert model.observed_training is False
+    assert model.observed_second_view is None
+    assert segmentation_state_sha256(model) == before
+    assert {name for name, parameter in model.named_parameters() if parameter.requires_grad} == {
+        "fusion.raw_xi",
+        "fusion.bias",
+    }
 
 
-@pytest.mark.parametrize("invalid", [0.0, -1.0, float("inf"), float("nan")])
-def test_probability_disagreement_scale_must_be_positive_and_finite(invalid):
-    config = copy.deepcopy(_config())
-    config["uncertainty"]["probability_disagreement_scale"] = invalid
-    with pytest.raises(ValueError, match="probability_disagreement_scale"):
-        validate_config(config)
+def test_joint_calibration_keeps_geometry_and_disables_eta():
+    model = _RiskOnlyToyModel()
+    configure_calibration_trainability(model, False)
+    assert model.segmenter.weight.requires_grad
+    assert model.fusion.raw_xi.requires_grad
+    assert model.fusion.bias.requires_grad
+    assert not model.fusion.raw_eta.requires_grad
 
 
-def test_stats_stage_is_explicitly_disabled():
-    with pytest.raises(ValueError, match="stats stage is disabled"):
-        run({}, "stats")
-
-
-def test_uncertainty_snapshot_contains_probability_component_only(tmp_path):
+def test_uncertainty_snapshot_contains_zernike_component_only(tmp_path):
     probability = torch.full((1, 4, 2, 2, 2), 0.25)
     result = DualHeadOutput(
         head_logits=(torch.empty(0), torch.empty(0)),
         head_region_probabilities=(torch.empty(0), torch.empty(0)),
         head_atomic_probabilities=(probability, probability),
         base_atomic_probability=probability,
-        probability_disagreement=torch.zeros(1, 1, 2, 2, 2),
+        zernike_disagreement=torch.full((1, 1, 2, 2, 2), 0.1),
         uncertainty=torch.full((1, 1, 2, 2, 2), 0.2),
     )
     batch = {"image": torch.zeros(1, 1, 2, 2, 2)}
@@ -249,5 +225,5 @@ def test_uncertainty_snapshot_contains_probability_component_only(tmp_path):
         save_components=True,
     )
     with np.load(paths[0]) as payload:
-        assert "probability_disagreement" in payload.files
-        assert "zernike_disagreement" not in payload.files
+        assert "zernike_disagreement" in payload.files
+        assert "probability_disagreement" not in payload.files

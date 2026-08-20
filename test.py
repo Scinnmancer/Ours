@@ -198,6 +198,11 @@ def run_evaluation(config: dict[str, Any], checkpoint: str, output_dir: str | No
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = DualHeadSwinUNETR(config).to(device)
     payload = load_checkpoint(checkpoint, model, strict=True)
+    if not model.zernike_stats.fitted:
+        raise RuntimeError(
+            "Checkpoint does not contain fitted Zernike source statistics; "
+            "run the stats or calibration stage first"
+        )
     model.eval()
     output = Path(output_dir) if output_dir else Path(checkpoint).resolve().parent / "evaluation"
     output.mkdir(parents=True, exist_ok=True)
@@ -208,8 +213,7 @@ def run_evaluation(config: dict[str, Any], checkpoint: str, output_dir: str | No
                 "checkpoint": str(Path(checkpoint).resolve()),
                 "stage": payload.get("stage"),
                 "epoch": payload.get("epoch"),
-                "uncertainty_source": "probability_disagreement",
-                "probability_disagreement_scale": model.probability_disagreement_scale,
+                "uncertainty_source": "zernike_disagreement",
             },
             stream,
             indent=2,

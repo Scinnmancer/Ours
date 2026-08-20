@@ -33,18 +33,16 @@ model:
   encoder_warm_start: true
 
 zernike:
-  # Legacy state_dict compatibility only; inactive in training and inference.
   windows: [3, 5, 7]
   orders: [[0, 0], [1, 1], [2, 0], [2, 2]]
   chunk_depth: 32
   stats_max_batches: 0
 
 uncertainty:
+  # Legacy checkpoint compatibility only; raw_eta is not used by geometric calibration.
   eta_init: 1.0
-  # Legacy state_dict compatibility only; raw_xi is never optimized or used.
   xi_init: 1.0
   bias_init: -2.0
-  probability_disagreement_scale: 15.0
   lambda_u: 0.1
   max_balanced_samples: 65536
 

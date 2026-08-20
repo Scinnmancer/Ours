@@ -6,8 +6,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .probability import jensen_shannon_divergence
-
 
 def _inverse_softplus(value: float) -> float:
     return math.log(math.expm1(value))
@@ -30,30 +28,20 @@ class UncertaintyFusion(nn.Module):
 
     def forward(
         self,
-        probability_disagreement: torch.Tensor,
-        zernike_disagreement: torch.Tensor | None = None,
-        probability_disagreement_scale: float = 1.0,
+        zernike_disagreement: torch.Tensor,
     ) -> torch.Tensor:
-        """Calibrate risk from probability disagreement only.
+        """Calibrate risk from Zernike geometric disagreement only.
 
-        ``zernike_disagreement`` and ``raw_xi`` remain part of the public/state
-        layout solely so legacy warm-up checkpoints continue to load strictly.
-        They intentionally do not contribute to the risk logit.
+        ``raw_eta`` remains in the state layout solely so existing warm-up and
+        probability-calibration checkpoints continue to load strictly. It does
+        not contribute to the active risk logit.
         """
-        del zernike_disagreement
-        scaled = probability_disagreement * float(probability_disagreement_scale)
-        return torch.sigmoid(self.bias + self.eta * scaled)
+        return torch.sigmoid(self.bias + self.xi * zernike_disagreement)
 
 
 def uncertainty_components(
-    head1_atomic: torch.Tensor,
-    head2_atomic: torch.Tensor,
+    zernike_disagreement: torch.Tensor,
     fusion: UncertaintyFusion,
-    probability_disagreement_scale: float = 1.0,
 ):
-    probability_disagreement = jensen_shannon_divergence(head1_atomic, head2_atomic)
-    uncertainty = fusion(
-        probability_disagreement,
-        probability_disagreement_scale=probability_disagreement_scale,
-    )
-    return probability_disagreement, uncertainty
+    uncertainty = fusion(zernike_disagreement)
+    return zernike_disagreement, uncertainty
