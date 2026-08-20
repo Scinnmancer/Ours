@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Iterable
@@ -87,6 +88,13 @@ def validate_config(config: dict[str, Any]) -> None:
     alpha = float(config["label_transfer"].get("alpha_max", 0.35))
     if not 0.0 <= alpha < 1.0:
         raise ValueError("label_transfer.alpha_max must be in [0, 1)")
+    refine_scale = float(config["evaluation"].get("refine_strength_scale", 1.0))
+    if not math.isfinite(refine_scale) or refine_scale <= 0.0:
+        raise ValueError("evaluation.refine_strength_scale must be finite and greater than 0")
+    if alpha * refine_scale >= 1.0:
+        raise ValueError(
+            "label_transfer.alpha_max * evaluation.refine_strength_scale must be less than 1"
+        )
     for key in ("warmup_epochs", "calibration_epochs", "validation_every"):
         if int(config["training"].get(key, 0)) <= 0:
             raise ValueError(f"training.{key} must be a positive integer")

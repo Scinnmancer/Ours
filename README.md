@@ -94,6 +94,13 @@ fine-tuning. The active risk formula is
 `sigmoid(bias + softplus(raw_xi) * zernike_disagreement)`; `raw_eta` is retained
 only for checkpoint compatibility.
 
+Standalone evaluation strengthens refinement only at test time with
+`evaluation.refine_strength_scale` (default `2.0`). With the default
+`label_transfer.alpha_max=0.35`, the effective update ceiling is `0.70`. The
+base value, multiplier, and effective value are saved in
+`checkpoint_metadata.json`; calibration, Z0 fitting, and checkpoint parameters
+are unchanged.
+
 If the configured split JSON is absent, the training entry point generates the
 deterministic center-based splits before constructing data loaders. Run
 `ours.prepare` explicitly when full path, affine, spacing, and label validation

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,30 @@ from .metrics import evaluate_case
 from .model import DualHeadSwinUNETR
 from .probability import atomic_label_to_scalar
 from .reproducibility import save_run_metadata, set_reproducibility
+
+
+def _configure_test_time_refinement(
+    model: DualHeadSwinUNETR, config: dict[str, Any]
+) -> dict[str, float]:
+    """Increase label-transfer strength for evaluation without changing checkpoints."""
+    base_alpha_max = float(model.label_transfer.alpha_max)
+    strength_scale = float(config["evaluation"].get("refine_strength_scale", 1.0))
+    effective_alpha_max = base_alpha_max * strength_scale
+    if (
+        not math.isfinite(strength_scale)
+        or strength_scale <= 0.0
+        or not 0.0 <= effective_alpha_max < 1.0
+    ):
+        raise ValueError(
+            "Effective test-time refine alpha_max must be in [0, 1); "
+            f"received {base_alpha_max} * {strength_scale} = {effective_alpha_max}"
+        )
+    model.label_transfer.alpha_max = effective_alpha_max
+    return {
+        "refine_base_alpha_max": base_alpha_max,
+        "refine_strength_scale": strength_scale,
+        "refine_effective_alpha_max": effective_alpha_max,
+    }
 
 
 def _case_name(batch: dict[str, Any], index: int) -> str:
@@ -203,6 +228,7 @@ def run_evaluation(config: dict[str, Any], checkpoint: str, output_dir: str | No
             "Checkpoint does not contain fitted Zernike source statistics; "
             "run the stats or calibration stage first"
         )
+    refinement = _configure_test_time_refinement(model, config)
     model.eval()
     output = Path(output_dir) if output_dir else Path(checkpoint).resolve().parent / "evaluation"
     output.mkdir(parents=True, exist_ok=True)
@@ -214,6 +240,7 @@ def run_evaluation(config: dict[str, Any], checkpoint: str, output_dir: str | No
                 "stage": payload.get("stage"),
                 "epoch": payload.get("epoch"),
                 "uncertainty_source": "zernike_disagreement",
+                **refinement,
             },
             stream,
             indent=2,
