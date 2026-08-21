@@ -10,6 +10,7 @@ from ours.probability import independent_logits_to_atomic, independent_logits_to
 from ours.train import (
     _make_scaler,
     _save_uncertainty_batch,
+    encoder_state_sha256,
     configure_calibration_trainability,
     segmentation_state_sha256,
     train_epoch,
@@ -118,11 +119,13 @@ def test_existing_warmup_state_dict_still_loads_strictly(monkeypatch, tmp_path):
 
 
 class _RiskOnlyToyModel(nn.Module):
-    ENCODER_PREFIXES = ("segmenter.",)
+    ENCODER_PREFIXES = ("encoder.",)
 
     def __init__(self):
         super().__init__()
-        self.segmenter = nn.Conv3d(1, 3, 1)
+        self.encoder = nn.Conv3d(1, 1, 1)
+        self.head1 = nn.Conv3d(1, 3, 1)
+        self.head2 = nn.Conv3d(1, 3, 1)
         self.fusion = UncertaintyFusion()
         self.observed_training = None
         self.observed_second_view = None
@@ -130,8 +133,8 @@ class _RiskOnlyToyModel(nn.Module):
     def forward(self, image, second_view=None, compute_uncertainty=False):
         self.observed_training = self.training
         self.observed_second_view = second_view
-        logits1 = self.segmenter(image)
-        logits2 = self.segmenter(image if second_view is None else second_view)
+        logits1 = self.head1(self.encoder(image))
+        logits2 = self.head2(self.encoder(image if second_view is None else second_view))
         regions1 = independent_logits_to_regions(logits1)
         regions2 = independent_logits_to_regions(logits2)
         atomic1 = independent_logits_to_atomic(logits1)
@@ -196,11 +199,58 @@ def test_frozen_calibration_uses_same_image_and_only_trains_xi_and_bias():
 
 def test_joint_calibration_keeps_geometry_and_disables_eta():
     model = _RiskOnlyToyModel()
-    configure_calibration_trainability(model, False)
-    assert model.segmenter.weight.requires_grad
+    configure_calibration_trainability(model, "full")
+    assert model.encoder.weight.requires_grad
+    assert model.head1.weight.requires_grad
     assert model.fusion.raw_xi.requires_grad
     assert model.fusion.bias.requires_grad
     assert not model.fusion.raw_eta.requires_grad
+
+
+def test_head_only_calibration_trains_decoder_heads_and_keeps_encoder_frozen(monkeypatch):
+    model = _tiny_dual_head(monkeypatch)
+    before = encoder_state_sha256(model)
+    configure_calibration_trainability(model, "heads")
+
+    assert any(parameter.requires_grad for parameter in model.head1.parameters())
+    assert any(parameter.requires_grad for parameter in model.head2.parameters())
+    assert not any(
+        parameter.requires_grad
+        for name, parameter in model.named_parameters()
+        if name.startswith(model.ENCODER_PREFIXES)
+    )
+    assert model.fusion.raw_xi.requires_grad
+    assert model.fusion.bias.requires_grad
+    assert not model.fusion.raw_eta.requires_grad
+    assert encoder_state_sha256(model) == before
+
+
+def test_head_only_calibration_updates_heads_but_not_encoder():
+    model = _RiskOnlyToyModel()
+    parameters = configure_calibration_trainability(model, "heads")
+    optimizer = torch.optim.AdamW(parameters, lr=1e-3)
+    encoder_before = encoder_state_sha256(model)
+    head_before = model.head1.weight.detach().clone()
+    train_epoch(
+        model,
+        [_toy_batch()],
+        optimizer,
+        _make_scaler(False),
+        torch.device("cpu"),
+        _ZeroSegmentationLoss(),
+        _config(),
+        lambda_u=1.0,
+        stage="calibration",
+        epoch=1,
+        calibration_scope="heads",
+    )
+
+    assert model.observed_training is False
+    assert model.head1.training is True
+    assert model.head2.training is True
+    assert model.observed_second_view is not None
+    assert encoder_state_sha256(model) == encoder_before
+    assert not torch.equal(model.head1.weight.detach(), head_before)
 
 
 def test_uncertainty_snapshot_contains_zernike_component_only(tmp_path):

@@ -101,6 +101,11 @@ def validate_config(config: dict[str, Any]) -> None:
     freeze_calibration = config["training"].get("freeze_segmentation_during_calibration", True)
     if not isinstance(freeze_calibration, bool):
         raise ValueError("training.freeze_segmentation_during_calibration must be a boolean")
+    calibration_scope = config["training"].get("calibration_trainable_scope")
+    if calibration_scope is not None and calibration_scope not in {"risk_only", "heads", "full"}:
+        raise ValueError(
+            "training.calibration_trainable_scope must be one of risk_only, heads, or full"
+        )
     if int(config["data"].get("workers", 8)) < 0:
         raise ValueError("data.workers must be a non-negative integer")
     if int(config["evaluation"].get("workers", 0)) < 0:

@@ -68,6 +68,10 @@ training:
   sw_batch_size: 4
   infer_overlap: 0.5
   dice_tolerance: 0.01
+  # Calibration defaults to updating only the two decoder heads and risk fusion;
+  # the shared encoder remains frozen. Valid values: risk_only, heads, full.
+  calibration_trainable_scope: heads
+  # Legacy fallback when calibration_trainable_scope is omitted from an old config.
   freeze_segmentation_during_calibration: true
 
 evaluation:

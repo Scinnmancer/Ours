@@ -86,11 +86,13 @@ python -m ours.train --config ours/configs/brats2020.yaml --stage calibration \
   --checkpoint ours/runs/dual_swin_zernike_brats2020/best_seg.pt
 ```
 
-Calibration freezes the shared encoder and both decoders by default, keeps the
-model in evaluation mode, feeds the same normalized patch to both heads, and
-optimizes only the geometric-risk `xi` and `bias`. Set
-`training.freeze_segmentation_during_calibration=false` to recover joint
-fine-tuning. The active risk formula is
+Calibration defaults to `training.calibration_trainable_scope=heads`: the shared
+encoder stays frozen while both decoder heads, geometric-risk `xi`, and `bias`
+are optimized jointly using the existing dual augmented views, segmentation
+loss, and ramped risk loss. The encoder hash is checked before and after this
+mode. Set the scope to `risk_only` for deterministic same-patch calibration of
+only `xi` and `bias`, or `full` to fine-tune the whole segmentation network.
+The active risk formula is
 `sigmoid(bias + softplus(raw_xi) * zernike_disagreement)`; `raw_eta` is retained
 only for checkpoint compatibility.
 

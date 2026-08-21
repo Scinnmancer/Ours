@@ -145,14 +145,48 @@ def segmentation_state_sha256(model: DualHeadSwinUNETR) -> str:
     return digest.hexdigest()
 
 
+def encoder_state_sha256(model: DualHeadSwinUNETR) -> str:
+    """Hash the shared encoder state so head-only calibration can keep it frozen."""
+    digest = hashlib.sha256()
+    for key, value in sorted(model.state_dict().items()):
+        if not key.startswith(model.ENCODER_PREFIXES):
+            continue
+        tensor = value.detach().cpu().contiguous()
+        digest.update(key.encode("utf-8"))
+        digest.update(str(tuple(tensor.shape)).encode("ascii"))
+        digest.update(tensor.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def calibration_trainable_scope(config: dict[str, Any]) -> str:
+    """Resolve explicit scopes while preserving legacy boolean configuration."""
+    scope = config["training"].get("calibration_trainable_scope")
+    if scope is not None:
+        return str(scope)
+    return "risk_only" if bool(config["training"].get("freeze_segmentation_during_calibration", True)) else "full"
+
+
 def configure_calibration_trainability(
     model: DualHeadSwinUNETR,
-    freeze_segmentation: bool,
+    scope: str | bool,
 ) -> list[torch.nn.Parameter]:
-    """Select calibration parameters while keeping legacy raw_eta inactive."""
+    """Select risk-only, head-only, or full calibration parameters.
+
+    ``bool`` is accepted for legacy callers: ``True`` is ``risk_only`` and
+    ``False`` is ``full``. ``raw_eta`` remains inactive in all modes.
+    """
+    if isinstance(scope, bool):
+        scope = "risk_only" if scope else "full"
+    if scope not in {"risk_only", "heads", "full"}:
+        raise ValueError(f"Unsupported calibration trainable scope: {scope}")
     trainable_names = {"fusion.raw_xi", "fusion.bias"}
     for name, parameter in model.named_parameters():
-        parameter.requires_grad_(not freeze_segmentation or name in trainable_names)
+        trainable = name in trainable_names
+        if scope == "heads":
+            trainable = trainable or name.startswith(("head1.", "head2."))
+        elif scope == "full":
+            trainable = True
+        parameter.requires_grad_(trainable)
         if name == "fusion.raw_eta":
             parameter.requires_grad_(False)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
@@ -174,9 +208,16 @@ def train_epoch(
     stage: str = "warmup",
     epoch: int = 0,
     freeze_segmentation: bool = False,
+    calibration_scope: str | None = None,
 ) -> dict[str, Any]:
-    if freeze_segmentation:
+    scope = calibration_scope or ("risk_only" if freeze_segmentation else "full")
+    if scope == "risk_only":
         model.eval()
+        model.fusion.train()
+    elif scope == "heads":
+        model.eval()
+        model.head1.train()
+        model.head2.train()
         model.fusion.train()
     else:
         model.train()
@@ -208,7 +249,7 @@ def train_epoch(
         telemetry.reset_peak_memory()
     for index, batch in enumerate(loader):
         batch_started = time.perf_counter()
-        if freeze_segmentation:
+        if scope == "risk_only":
             image1 = batch["image"].to(device, non_blocking=True)
             image2 = None
         else:
@@ -218,7 +259,7 @@ def train_epoch(
         atomic_target = batch["label_atomic"].to(device, non_blocking=True).long()
         optimizer.zero_grad(set_to_none=True)
         with autocast_context(device, amp):
-            compute_uncertainty = freeze_segmentation or lambda_u > 0.0
+            compute_uncertainty = stage == "calibration" or lambda_u > 0.0
             output = model(image1, image2, compute_uncertainty=compute_uncertainty)
             head_losses = [loss_function(logits, target) for logits in output.head_logits]
             segmentation = sum(head_losses)
@@ -230,7 +271,7 @@ def train_epoch(
                     error,
                     max_samples=int(config["uncertainty"].get("max_balanced_samples", 65536)),
                 )
-            loss = br if freeze_segmentation else segmentation + lambda_u * br
+            loss = br if scope == "risk_only" else segmentation + lambda_u * br
         scale_before = float(scaler.get_scale())
         scaler.scale(loss).backward()
         sample_gradient = (index + 1) % gradient_interval == 0 or index + 1 == len(loader)
@@ -322,8 +363,9 @@ def train_epoch(
             )
     metrics["duration_seconds"] = time.perf_counter() - started
     metrics["lambda_u"] = float(lambda_u)
-    metrics["risk_loss_weight"] = 1.0 if freeze_segmentation else float(lambda_u)
-    metrics["freeze_segmentation"] = float(freeze_segmentation)
+    metrics["risk_loss_weight"] = 1.0 if scope == "risk_only" else float(lambda_u)
+    metrics["freeze_segmentation"] = float(scope == "risk_only")
+    metrics["calibration_trainable_scope"] = scope
     for index, group in enumerate(optimizer.param_groups):
         metrics[f"learning_rate_group_{index}"] = float(group["lr"])
     return metrics
@@ -761,11 +803,11 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             source = stats_path
             source_payload = _load_required(source, model)
         reference_dice = float(source_payload.get("metrics", {}).get("mean_dice", -math.inf))
-        freeze_segmentation = bool(
-            config["training"].get("freeze_segmentation_during_calibration", True)
-        )
+        calibration_scope = calibration_trainable_scope(config)
+        freeze_segmentation = calibration_scope == "risk_only"
         segmentation_sha256_before = segmentation_state_sha256(model)
-        calibration_parameters = configure_calibration_trainability(model, freeze_segmentation)
+        encoder_sha256_before = encoder_state_sha256(model)
+        calibration_parameters = configure_calibration_trainability(model, calibration_scope)
         telemetry.event(
             "stage_started",
             stage="calibration",
@@ -773,8 +815,10 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             source_stage=source_payload.get("stage"),
             source_epoch=source_payload.get("epoch"),
             uncertainty_source="zernike_disagreement",
+            calibration_trainable_scope=calibration_scope,
             freeze_segmentation=freeze_segmentation,
             segmentation_sha256_before=segmentation_sha256_before,
+            encoder_sha256_before=encoder_sha256_before,
         )
         epochs = int(config["training"]["calibration_epochs"])
         optimizer = torch.optim.AdamW(
@@ -807,6 +851,7 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                 stage="calibration",
                 epoch=epoch + 1,
                 freeze_segmentation=freeze_segmentation,
+                calibration_scope=calibration_scope,
             )
             scheduler.step()
             telemetry.epoch_finished(
@@ -832,10 +877,12 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                 metrics["lambda_u"] = lambda_u
                 metrics["risk_loss_weight"] = 1.0 if freeze_segmentation else lambda_u
                 metrics["freeze_segmentation"] = freeze_segmentation
+                metrics["calibration_trainable_scope"] = calibration_scope
                 metrics["calibration_input"] = (
                     "same_unaugmented_image" if freeze_segmentation else "dual_augmented_views"
                 )
                 metrics["segmentation_sha256_before"] = segmentation_sha256_before
+                metrics["encoder_sha256_before"] = encoder_sha256_before
                 print(f"calibration epoch={epoch + 1} train={train_metrics} val={metrics}")
                 telemetry.validation_finished("calibration", epoch + 1, metrics)
                 if map_dir is not None:
@@ -879,10 +926,16 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
         if "scheduler" in calibrated_payload:
             scheduler.load_state_dict(calibrated_payload["scheduler"])
         segmentation_sha256_after = segmentation_state_sha256(model)
+        encoder_sha256_after = encoder_state_sha256(model)
         if freeze_segmentation and segmentation_sha256_after != segmentation_sha256_before:
             raise RuntimeError(
                 "Frozen segmentation weights changed during calibration: "
                 f"{segmentation_sha256_before} != {segmentation_sha256_after}"
+            )
+        if calibration_scope == "heads" and encoder_sha256_after != encoder_sha256_before:
+            raise RuntimeError(
+                "Frozen encoder weights changed during head-only calibration: "
+                f"{encoder_sha256_before} != {encoder_sha256_after}"
             )
         z0 = fit_z0(model, val_loader, device, config)
         telemetry.event("z0_fitted", value=z0, source="validation")
@@ -893,8 +946,11 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                 "z0": z0,
                 "uncertainty_source": "zernike_disagreement",
                 "freeze_segmentation": freeze_segmentation,
+                "calibration_trainable_scope": calibration_scope,
                 "segmentation_sha256_before": segmentation_sha256_before,
                 "segmentation_sha256_after": segmentation_sha256_after,
+                "encoder_sha256_before": encoder_sha256_before,
+                "encoder_sha256_after": encoder_sha256_after,
             }
         )
         save_checkpoint(
@@ -912,9 +968,13 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             "stage_finished",
             stage="calibration",
             best_risk_ece=best_risk_ece,
+            calibration_trainable_scope=calibration_scope,
             segmentation_sha256_before=segmentation_sha256_before,
             segmentation_sha256_after=segmentation_sha256_after,
             segmentation_unchanged=segmentation_sha256_before == segmentation_sha256_after,
+            encoder_sha256_before=encoder_sha256_before,
+            encoder_sha256_after=encoder_sha256_after,
+            encoder_unchanged=encoder_sha256_before == encoder_sha256_after,
         )
         telemetry.close("completed", artifact=str(final_path))
         return final_path
