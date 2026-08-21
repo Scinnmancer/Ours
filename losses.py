@@ -18,15 +18,23 @@ class RegionDiceLoss(nn.Module):
         return self.loss(logits, target.float())
 
 
-def balanced_brier_loss(uncertainty: torch.Tensor, error: torch.Tensor, max_samples: int = 65536) -> torch.Tensor:
-    uncertainty = uncertainty.reshape(-1)
-    error = error.to(dtype=uncertainty.dtype).reshape(-1)
+def balanced_pairwise_ranking_loss(
+    disagreement: torch.Tensor,
+    error: torch.Tensor,
+    max_pairs: int = 32768,
+) -> torch.Tensor:
+    """Rank error voxels above correct voxels using balanced random pairs."""
+    if max_pairs <= 0:
+        raise ValueError("max_pairs must be a positive integer")
+    disagreement = disagreement.reshape(-1)
+    error = error.to(dtype=disagreement.dtype).reshape(-1)
     positive = torch.nonzero(error > 0.5, as_tuple=False).flatten()
     negative = torch.nonzero(error <= 0.5, as_tuple=False).flatten()
     if positive.numel() == 0 or negative.numel() == 0:
-        return F.mse_loss(uncertainty, error)
-    count = min(positive.numel(), negative.numel(), max_samples // 2)
+        return disagreement.sum() * 0.0
+    count = min(positive.numel(), negative.numel(), max_pairs)
     pos_idx = positive[torch.randperm(positive.numel(), device=positive.device)[:count]]
     neg_idx = negative[torch.randperm(negative.numel(), device=negative.device)[:count]]
-    indices = torch.cat((pos_idx, neg_idx))
-    return F.mse_loss(uncertainty[indices], error[indices])
+    # softplus(d_correct - d_error) directly optimizes the desired ordering
+    # without treating the disagreement score as a calibrated probability.
+    return F.softplus(disagreement[neg_idx] - disagreement[pos_idx]).mean()

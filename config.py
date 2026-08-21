@@ -98,13 +98,18 @@ def validate_config(config: dict[str, Any]) -> None:
     for key in ("warmup_epochs", "calibration_epochs", "validation_every"):
         if int(config["training"].get(key, 0)) <= 0:
             raise ValueError(f"training.{key} must be a positive integer")
+    alignment_weight = float(config["uncertainty"].get("lambda_u", 0.5))
+    if not math.isfinite(alignment_weight) or alignment_weight < 0.0:
+        raise ValueError("uncertainty.lambda_u must be finite and non-negative")
+    if int(config["uncertainty"].get("max_alignment_pairs", 32768)) <= 0:
+        raise ValueError("uncertainty.max_alignment_pairs must be a positive integer")
     freeze_calibration = config["training"].get("freeze_segmentation_during_calibration", True)
     if not isinstance(freeze_calibration, bool):
         raise ValueError("training.freeze_segmentation_during_calibration must be a boolean")
     calibration_scope = config["training"].get("calibration_trainable_scope")
-    if calibration_scope is not None and calibration_scope not in {"risk_only", "heads", "full"}:
+    if calibration_scope is not None and calibration_scope not in {"heads", "full"}:
         raise ValueError(
-            "training.calibration_trainable_scope must be one of risk_only, heads, or full"
+            "training.calibration_trainable_scope must be one of heads or full"
         )
     if int(config["data"].get("workers", 8)) < 0:
         raise ValueError("data.workers must be a non-negative integer")

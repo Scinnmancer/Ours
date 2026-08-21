@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 
 from ours.checkpoint import load_checkpoint, save_checkpoint
+from ours.losses import balanced_pairwise_ranking_loss
 from ours.model import DualHeadOutput, DualHeadSwinUNETR
 from ours.probability import independent_logits_to_atomic, independent_logits_to_regions
 from ours.train import (
@@ -12,7 +13,6 @@ from ours.train import (
     _save_uncertainty_batch,
     encoder_state_sha256,
     configure_calibration_trainability,
-    segmentation_state_sha256,
     train_epoch,
 )
 from ours.uncertainty import UncertaintyFusion
@@ -159,21 +159,35 @@ class _ZeroSegmentationLoss(nn.Module):
 
 
 def _toy_batch():
-    image = torch.zeros(1, 1, 2, 2, 2)
+    image = torch.arange(8, dtype=torch.float32).reshape(1, 1, 2, 2, 2) / 8.0
+    atomic = torch.zeros(1, 2, 2, 2, dtype=torch.uint8)
+    atomic[..., 1:] = 1
     return {
         "image": image,
         "image_view1": image + 1.0,
         "image_view2": image + 2.0,
         "label_regions": torch.zeros(1, 3, 2, 2, 2),
-        "label_atomic": torch.ones(1, 2, 2, 2, dtype=torch.uint8),
+        "label_atomic": atomic,
     }
 
 
-def test_frozen_calibration_uses_same_image_and_only_trains_xi_and_bias():
+def test_pairwise_alignment_pushes_error_scores_above_correct_scores():
+    disagreement = torch.tensor([0.1, 0.2, 0.8, 0.9], requires_grad=True)
+    error = torch.tensor([1.0, 1.0, 0.0, 0.0])
+
+    loss = balanced_pairwise_ranking_loss(disagreement, error, max_pairs=2)
+    loss.backward()
+
+    assert float(disagreement.grad[:2].max()) < 0.0
+    assert float(disagreement.grad[2:].min()) > 0.0
+
+
+def test_legacy_frozen_flag_maps_to_head_alignment_with_fixed_fusion():
     model = _RiskOnlyToyModel()
     parameters = configure_calibration_trainability(model, True)
     optimizer = torch.optim.AdamW(parameters, lr=1e-3)
-    before = segmentation_state_sha256(model)
+    encoder_before = encoder_state_sha256(model)
+    head_before = model.head1.weight.detach().clone()
     train_epoch(
         model,
         [_toy_batch()],
@@ -190,10 +204,13 @@ def test_frozen_calibration_uses_same_image_and_only_trains_xi_and_bias():
 
     assert model.observed_training is False
     assert model.observed_second_view is None
-    assert segmentation_state_sha256(model) == before
+    assert encoder_state_sha256(model) == encoder_before
+    assert not torch.equal(model.head1.weight.detach(), head_before)
     assert {name for name, parameter in model.named_parameters() if parameter.requires_grad} == {
-        "fusion.raw_xi",
-        "fusion.bias",
+        "head1.weight",
+        "head1.bias",
+        "head2.weight",
+        "head2.bias",
     }
 
 
@@ -202,8 +219,8 @@ def test_joint_calibration_keeps_geometry_and_disables_eta():
     configure_calibration_trainability(model, "full")
     assert model.encoder.weight.requires_grad
     assert model.head1.weight.requires_grad
-    assert model.fusion.raw_xi.requires_grad
-    assert model.fusion.bias.requires_grad
+    assert not model.fusion.raw_xi.requires_grad
+    assert not model.fusion.bias.requires_grad
     assert not model.fusion.raw_eta.requires_grad
 
 
@@ -219,8 +236,8 @@ def test_head_only_calibration_trains_decoder_heads_and_keeps_encoder_frozen(mon
         for name, parameter in model.named_parameters()
         if name.startswith(model.ENCODER_PREFIXES)
     )
-    assert model.fusion.raw_xi.requires_grad
-    assert model.fusion.bias.requires_grad
+    assert not model.fusion.raw_xi.requires_grad
+    assert not model.fusion.bias.requires_grad
     assert not model.fusion.raw_eta.requires_grad
     assert encoder_state_sha256(model) == before
 
@@ -246,9 +263,9 @@ def test_head_only_calibration_updates_heads_but_not_encoder():
     )
 
     assert model.observed_training is False
-    assert model.head1.training is True
-    assert model.head2.training is True
-    assert model.observed_second_view is not None
+    assert model.head1.training is False
+    assert model.head2.training is False
+    assert model.observed_second_view is None
     assert encoder_state_sha256(model) == encoder_before
     assert not torch.equal(model.head1.weight.detach(), head_before)
 
