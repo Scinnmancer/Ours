@@ -101,6 +101,21 @@ def validate_config(config: dict[str, Any]) -> None:
     calibration_weight = float(config["uncertainty"].get("lambda_u", 1.0))
     if not math.isfinite(calibration_weight) or calibration_weight < 0.0:
         raise ValueError("uncertainty.lambda_u must be finite and non-negative")
+    radial_gradient = config["uncertainty"].get("radial_gradient", {})
+    if not isinstance(radial_gradient, dict):
+        raise ValueError("uncertainty.radial_gradient must be a mapping")
+    radial_enabled = radial_gradient.get("enabled", False)
+    if not isinstance(radial_enabled, bool):
+        raise ValueError("uncertainty.radial_gradient.enabled must be a boolean")
+    radial_weight = float(radial_gradient.get("weight", 0.01))
+    if not math.isfinite(radial_weight) or radial_weight < 0.0:
+        raise ValueError("uncertainty.radial_gradient.weight must be finite and non-negative")
+    for key in ("uncertainty_power", "confidence_power"):
+        value = float(radial_gradient.get(key, 2.0))
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(
+                f"uncertainty.radial_gradient.{key} must be finite and non-negative"
+            )
     freeze_calibration = config["training"].get("freeze_segmentation_during_calibration", True)
     if not isinstance(freeze_calibration, bool):
         raise ValueError("training.freeze_segmentation_during_calibration must be a boolean")

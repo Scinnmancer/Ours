@@ -21,6 +21,7 @@ from .metrics import MetricSampleReservoir, aupr, auroc, expected_calibration_er
 from .model import DualHeadOutput, DualHeadSwinUNETR
 from .monitoring import TrainingTelemetry, gradient_statistics
 from .reproducibility import save_run_metadata, set_reproducibility
+from .uncertainty import uncertainty_weighted_radial_gradient
 from .zernike import WelfordAccumulator
 
 
@@ -166,12 +167,11 @@ def calibration_trainable_scope(config: dict[str, Any]) -> str:
     return "heads" if bool(config["training"].get("freeze_segmentation_during_calibration", True)) else "full"
 
 
-def calibration_checkpoint_key(metrics: dict[str, Any]) -> tuple[float, float, float]:
-    """Order eligible checkpoints by Risk ECE, Risk Brier, then Dice."""
-    risk_ece = float(metrics.get("risk_ece", math.inf))
-    risk_brier = float(metrics.get("risk_brier", math.inf))
+def calibration_checkpoint_key(metrics: dict[str, Any]) -> tuple[float, float]:
+    """Order Dice-eligible checkpoints by ordinary ECE, then Dice."""
+    ece = float(metrics.get("basic_ece", metrics.get("ece", math.inf)))
     mean_dice = float(metrics.get("mean_dice", -math.inf))
-    return risk_ece, risk_brier, -mean_dice
+    return ece, -mean_dice
 
 
 def configure_calibration_trainability(
@@ -218,6 +218,15 @@ def train_epoch(
     calibration_scope: str | None = None,
 ) -> dict[str, Any]:
     scope = calibration_scope or ("heads" if freeze_segmentation else "full")
+    radial_config = config["uncertainty"].get("radial_gradient", {})
+    radial_gradient_weight = float(radial_config.get("weight", 0.01))
+    radial_gradient_enabled = (
+        stage == "calibration"
+        and bool(radial_config.get("enabled", False))
+        and radial_gradient_weight > 0.0
+    )
+    radial_uncertainty_power = float(radial_config.get("uncertainty_power", 2.0))
+    radial_confidence_power = float(radial_config.get("confidence_power", 2.0))
     if stage == "calibration":
         # Keep the frozen encoder deterministic while enabling each decoder's
         # independent Dropout3d during calibration.
@@ -243,6 +252,8 @@ def train_epoch(
         "amp_skipped_steps": 0.0,
         "zernike_disagreement": 0.0,
         "uncertainty_mean": 0.0,
+        "radial_gradient_l2": 0.0,
+        "radial_gradient_abs_mean": 0.0,
     }
     intersections = {name: torch.zeros(3, dtype=torch.float64) for name in ("head1", "head2", "base")}
     denominators = {name: torch.zeros(3, dtype=torch.float64) for name in ("head1", "head2", "base")}
@@ -265,6 +276,7 @@ def train_epoch(
         target = batch["label_regions"].to(device, non_blocking=True)
         atomic_target = batch["label_atomic"].to(device, non_blocking=True).long()
         optimizer.zero_grad(set_to_none=True)
+        radial_gradients: tuple[torch.Tensor, ...] = ()
         with autocast_context(device, amp):
             compute_uncertainty = stage == "calibration" or lambda_u > 0.0
             output = model(image1, image2, compute_uncertainty=compute_uncertainty)
@@ -281,10 +293,53 @@ def train_epoch(
                     output.uncertainty[:, 0][calibration_mask],
                     error[calibration_mask],
                 )
+                if radial_gradient_enabled:
+                    base_confidence = output.base_atomic_probability.max(dim=1, keepdim=True).values
+                    radial_gradients = tuple(
+                        uncertainty_weighted_radial_gradient(
+                            logits,
+                            output.uncertainty,
+                            base_confidence,
+                            mask=calibration_mask,
+                            uncertainty_power=radial_uncertainty_power,
+                            confidence_power=radial_confidence_power,
+                        )
+                        for logits in output.head_logits
+                    )
             weighted_calibration_brier = lambda_u * calibration_brier
             loss = segmentation + weighted_calibration_brier
         scale_before = float(scaler.get_scale())
-        scaler.scale(loss).backward()
+        hook_handles = []
+        injected_gradients: tuple[torch.Tensor, ...] = ()
+        if radial_gradients:
+            injected_gradients = tuple(
+                radial_gradient_weight * gradient.detach() for gradient in radial_gradients
+            )
+            for logits, injected in zip(output.head_logits, injected_gradients):
+                hook_handles.append(
+                    logits.register_hook(
+                        lambda gradient, correction=injected, amp_scale=scale_before: (
+                            gradient + correction.to(dtype=gradient.dtype) * amp_scale
+                        )
+                    )
+                )
+        try:
+            scaler.scale(loss).backward()
+        finally:
+            for handle in hook_handles:
+                handle.remove()
+        if injected_gradients:
+            radial_square_sum = sum(
+                float(gradient.detach().float().square().sum())
+                for gradient in injected_gradients
+            )
+            radial_abs_sum = sum(
+                float(gradient.detach().float().abs().sum())
+                for gradient in injected_gradients
+            )
+            radial_numel = sum(gradient.numel() for gradient in injected_gradients)
+            totals["radial_gradient_l2"] += math.sqrt(radial_square_sum)
+            totals["radial_gradient_abs_mean"] += radial_abs_sum / max(radial_numel, 1)
         sample_gradient = (index + 1) % gradient_interval == 0 or index + 1 == len(loader)
         if sample_gradient:
             scaler.unscale_(optimizer)
@@ -351,7 +406,8 @@ def train_epoch(
             f"batch {index + 1}/{len(loader)} loss={float(loss.detach()):.5f} "
             f"seg={float(segmentation.detach()):.5f} "
             f"calibration_brier={float(calibration_brier.detach()):.5f} "
-            f"weighted_calibration_brier={float(weighted_calibration_brier.detach()):.5f}",
+            f"weighted_calibration_brier={float(weighted_calibration_brier.detach()):.5f} "
+            f"radial_gradient_l2={math.sqrt(radial_square_sum) if injected_gradients else 0.0:.5f}",
             flush=True,
         )
     batches = max(len(loader), 1)
@@ -381,6 +437,10 @@ def train_epoch(
     metrics["calibration_loss_weight"] = float(lambda_u)
     metrics["freeze_segmentation"] = 0.0
     metrics["calibration_trainable_scope"] = scope
+    metrics["radial_gradient_enabled"] = radial_gradient_enabled
+    metrics["radial_gradient_weight"] = radial_gradient_weight if radial_gradient_enabled else 0.0
+    metrics["radial_uncertainty_power"] = radial_uncertainty_power
+    metrics["radial_confidence_power"] = radial_confidence_power
     if compute_uncertainty:
         metrics["fusion_xi"] = float(model.fusion.xi.detach())
         metrics["fusion_bias"] = float(model.fusion.bias.detach())
@@ -836,6 +896,13 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             source_payload = _load_required(source, model)
         reference_dice = float(source_payload.get("metrics", {}).get("mean_dice", -math.inf))
         calibration_scope = calibration_trainable_scope(config)
+        radial_gradient_config = config["uncertainty"].get("radial_gradient", {})
+        confidence_gradient = (
+            "uncertainty_weighted_radial"
+            if bool(radial_gradient_config.get("enabled", False))
+            and float(radial_gradient_config.get("weight", 0.01)) > 0.0
+            else "disabled"
+        )
         freeze_segmentation = False
         segmentation_sha256_before = segmentation_state_sha256(model)
         encoder_sha256_before = encoder_state_sha256(model)
@@ -852,6 +919,8 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             freeze_segmentation=freeze_segmentation,
             fusion_frozen=False,
             calibration_input="independent_augmented_views_with_head_dropout",
+            confidence_gradient=confidence_gradient,
+            radial_gradient=radial_gradient_config,
             segmentation_sha256_before=segmentation_sha256_before,
             encoder_sha256_before=encoder_sha256_before,
         )
@@ -863,7 +932,7 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
         )
         scheduler = _scheduler(optimizer, epochs, min(5, epochs))
         scaler = _make_scaler(bool(config["training"].get("amp", True)) and device.type == "cuda")
-        best_calibration_key: tuple[float, float, float] | None = None
+        best_calibration_key: tuple[float, float] | None = None
         selected_this_run = False
         last_path = run_dir / "last_calibration.pt"
         target_lambda = float(config["uncertainty"].get("lambda_u", 1.0))
@@ -911,6 +980,8 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                 metrics["calibration_trainable_scope"] = calibration_scope
                 metrics["calibration_input"] = "independent_augmented_views_with_head_dropout"
                 metrics["uncertainty_objective"] = "risk_brier"
+                metrics["confidence_gradient"] = confidence_gradient
+                metrics["radial_gradient"] = radial_gradient_config
                 metrics["fusion_frozen"] = False
                 metrics["segmentation_sha256_before"] = segmentation_sha256_before
                 metrics["encoder_sha256_before"] = encoder_sha256_before
@@ -948,8 +1019,9 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                         "best_checkpoint_saved",
                         stage="calibration",
                         epoch=epoch + 1,
-                        metric="risk_ece",
-                        value=float(metrics["risk_ece"]),
+                        metric="ece",
+                        value=float(metrics["ece"]),
+                        risk_ece=float(metrics["risk_ece"]),
                         risk_brier=float(metrics["risk_brier"]),
                         mean_dice=metrics["mean_dice"],
                         path=str(calibrated_path),
@@ -992,6 +1064,8 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                 "uncertainty_objective": "risk_brier",
                 "fusion_frozen": False,
                 "calibration_input": "independent_augmented_views_with_head_dropout",
+                "confidence_gradient": confidence_gradient,
+                "radial_gradient": radial_gradient_config,
                 "freeze_segmentation": freeze_segmentation,
                 "calibration_trainable_scope": calibration_scope,
                 "segmentation_sha256_before": segmentation_sha256_before,
@@ -1014,7 +1088,7 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
         telemetry.event(
             "stage_finished",
             stage="calibration",
-            best_risk_ece=(best_calibration_key[0] if best_calibration_key is not None else None),
+            best_ece=(best_calibration_key[0] if best_calibration_key is not None else None),
             calibration_trainable_scope=calibration_scope,
             segmentation_sha256_before=segmentation_sha256_before,
             segmentation_sha256_after=segmentation_sha256_after,

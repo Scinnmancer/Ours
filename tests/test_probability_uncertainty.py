@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from ours.checkpoint import load_checkpoint, save_checkpoint
+from ours.config import validate_config
 from ours.losses import risk_brier_loss
 from ours.model import DualHeadOutput, DualHeadSwinUNETR
 from ours.probability import independent_logits_to_atomic, independent_logits_to_regions
@@ -17,7 +18,7 @@ from ours.train import (
     configure_calibration_trainability,
     train_epoch,
 )
-from ours.uncertainty import UncertaintyFusion
+from ours.uncertainty import UncertaintyFusion, uncertainty_weighted_radial_gradient
 
 
 def _config() -> dict:
@@ -37,6 +38,12 @@ def _config() -> dict:
             "xi_init": 1.0,
             "bias_init": -2.0,
             "lambda_u": 1.0,
+            "radial_gradient": {
+                "enabled": True,
+                "weight": 0.01,
+                "uncertainty_power": 2.0,
+                "confidence_power": 2.0,
+            },
         },
         "label_transfer": {"radius": 1, "sigma": 1.0, "alpha_max": 0.2},
         "training": {
@@ -118,6 +125,7 @@ def test_existing_warmup_state_dict_still_loads_strictly(monkeypatch, tmp_path):
 
     assert payload["stage"] == "warmup"
     assert current.state_dict().keys() == legacy.state_dict().keys()
+    assert not current.zernike_stats.fitted
 
 
 class _RiskOnlyToyModel(nn.Module):
@@ -188,6 +196,60 @@ def test_risk_brier_loss_fits_uncertainty_to_error_probability():
 def test_risk_brier_loss_requires_aligned_shapes():
     with pytest.raises(ValueError, match="identical shapes"):
         risk_brier_loss(torch.zeros(2), torch.zeros(1, 2))
+
+
+def test_radial_gradient_is_stronger_for_high_uncertainty_and_reduces_confidence():
+    logits = torch.full((1, 3, 1, 1, 1), -4.0)
+    atomic = independent_logits_to_atomic(logits)
+    confidence = atomic.amax(dim=1, keepdim=True)
+    high = uncertainty_weighted_radial_gradient(
+        logits,
+        torch.full_like(confidence, 0.9),
+        confidence,
+    )
+    low = uncertainty_weighted_radial_gradient(
+        logits,
+        torch.full_like(confidence, 0.1),
+        confidence,
+    )
+
+    updated_logits = logits - high
+    updated_atomic = independent_logits_to_atomic(updated_logits)
+
+    assert float(high.norm()) > float(low.norm())
+    assert float(updated_atomic.amax()) < float(atomic.amax())
+    assert int(updated_atomic.argmax(dim=1)) == int(atomic.argmax(dim=1))
+    assert not high.requires_grad
+
+
+def test_radial_gradient_handles_zero_logits_uncertainty_and_empty_mask():
+    logits = torch.zeros(1, 3, 2, 2, 2, requires_grad=True)
+    scalar = torch.zeros(1, 1, 2, 2, 2)
+    gradient = uncertainty_weighted_radial_gradient(
+        logits,
+        scalar,
+        torch.ones_like(scalar),
+        mask=torch.zeros(1, 2, 2, 2, dtype=torch.bool),
+    )
+
+    torch.testing.assert_close(gradient, torch.zeros_like(logits))
+    assert bool(torch.isfinite(gradient).all())
+    assert not gradient.requires_grad
+
+
+def test_radial_gradient_config_rejects_negative_weight():
+    config = _config()
+    config["uncertainty"]["radial_gradient"]["weight"] = -0.01
+
+    with pytest.raises(ValueError, match="radial_gradient.weight"):
+        validate_config(config)
+
+
+def test_legacy_config_without_radial_gradient_remains_valid():
+    config = _config()
+    del config["uncertainty"]["radial_gradient"]
+
+    validate_config(config)
 
 
 def test_legacy_frozen_flag_maps_to_head_risk_calibration():
@@ -282,17 +344,54 @@ def test_head_only_calibration_updates_heads_but_not_encoder():
     assert not torch.equal(model.fusion.bias.detach(), fusion_bias_before)
 
 
-def test_calibration_checkpoint_key_prioritizes_risk_ece_then_brier_then_dice():
-    best_ece = {"risk_ece": 0.04, "risk_brier": 0.20, "mean_dice": 0.75}
-    worse_ece = {"risk_ece": 0.05, "risk_brier": 0.10, "mean_dice": 0.90}
-    same_ece_better_brier = {"risk_ece": 0.04, "risk_brier": 0.19, "mean_dice": 0.70}
-    same_ece_brier_better_dice = {"risk_ece": 0.04, "risk_brier": 0.19, "mean_dice": 0.80}
-
-    assert calibration_checkpoint_key(best_ece) < calibration_checkpoint_key(worse_ece)
-    assert calibration_checkpoint_key(same_ece_better_brier) < calibration_checkpoint_key(best_ece)
-    assert calibration_checkpoint_key(same_ece_brier_better_dice) < calibration_checkpoint_key(
-        same_ece_better_brier
+def test_radial_gradient_updates_only_during_calibration():
+    calibration_model = _RiskOnlyToyModel()
+    calibration_parameters = configure_calibration_trainability(calibration_model, "heads")
+    calibration_optimizer = torch.optim.SGD(calibration_parameters, lr=0.1)
+    calibration_head_before = calibration_model.head1.weight.detach().clone()
+    calibration_encoder_before = encoder_state_sha256(calibration_model)
+    train_epoch(
+        calibration_model,
+        [_toy_batch()],
+        calibration_optimizer,
+        _make_scaler(False),
+        torch.device("cpu"),
+        _ZeroSegmentationLoss(),
+        _config(),
+        lambda_u=0.0,
+        stage="calibration",
+        epoch=1,
+        calibration_scope="heads",
     )
+
+    warmup_model = _RiskOnlyToyModel()
+    warmup_optimizer = torch.optim.SGD(warmup_model.parameters(), lr=0.1)
+    warmup_head_before = warmup_model.head1.weight.detach().clone()
+    train_epoch(
+        warmup_model,
+        [_toy_batch()],
+        warmup_optimizer,
+        _make_scaler(False),
+        torch.device("cpu"),
+        _ZeroSegmentationLoss(),
+        _config(),
+        lambda_u=0.0,
+        stage="warmup",
+        epoch=1,
+    )
+
+    assert not torch.equal(calibration_model.head1.weight.detach(), calibration_head_before)
+    assert encoder_state_sha256(calibration_model) == calibration_encoder_before
+    torch.testing.assert_close(warmup_model.head1.weight.detach(), warmup_head_before)
+
+
+def test_calibration_checkpoint_key_prioritizes_basic_ece_then_dice():
+    better_ece = {"ece": 0.04, "risk_ece": 0.30, "risk_brier": 0.30, "mean_dice": 0.75}
+    worse_ece = {"ece": 0.05, "risk_ece": 0.01, "risk_brier": 0.01, "mean_dice": 0.90}
+    same_ece_better_dice = {"ece": 0.04, "risk_ece": 0.50, "risk_brier": 0.50, "mean_dice": 0.80}
+
+    assert calibration_checkpoint_key(better_ece) < calibration_checkpoint_key(worse_ece)
+    assert calibration_checkpoint_key(same_ece_better_dice) < calibration_checkpoint_key(better_ece)
 
 
 def test_uncertainty_snapshot_contains_zernike_component_only(tmp_path):

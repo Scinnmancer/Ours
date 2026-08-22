@@ -45,6 +45,12 @@ uncertainty:
   bias_init: -2.0
   # Weight for Brier alignment of Zernike-derived risk with voxel errors.
   lambda_u: 1.0
+  # Calibration-only inward gradient for high-uncertainty, high-confidence logits.
+  radial_gradient:
+    enabled: true
+    weight: 0.01
+    uncertainty_power: 2.0
+    confidence_power: 2.0
 
 label_transfer:
   radius: 2

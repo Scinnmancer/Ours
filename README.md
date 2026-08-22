@@ -6,6 +6,9 @@ probability disagreement is not computed or used by calibration, Z0 fitting, or
 evaluation. A monotonic fusion maps raw disagreement into `[0, 1]` and is fitted
 with voxel-wise error targets during calibration.
 
+The calibration-only confidence intervention is documented in
+[`CALIBRATION_RADIAL_GRADIENT.md`](CALIBRATION_RADIAL_GRADIENT.md).
+
 ## Probability convention
 
 Each decoder follows the baseline convention and emits three independent logits
@@ -93,17 +96,20 @@ intensity views and keep their independent `Dropout3d` modules active. Risk is
 computed as `u = sigmoid(bias + softplus(raw_xi) * zernike_disagreement)`, and the
 calibration term is the mean `(u - error)^2` over the union of predicted and true
 tumor voxels. The total loss is the sum of both heads' Dice losses plus this Brier
-term with constant `lambda_u=1.0`; it is not ramped. The encoder hash is checked
-before and after calibration. Set the scope to `full` only when the shared
-segmentation network should also be fine-tuned.
+term with constant `lambda_u=1.0`; it is not ramped. During calibration only, an
+additional detached gradient contracts each head's independent sigmoid logits
+toward zero with weight `lambda * u^beta * confidence^gamma`. The default radial
+coefficient is `0.01`; no scalar loss, model parameter, or inference operation is
+added. The encoder hash is checked before and after calibration. Set the scope to
+`full` only when the shared segmentation network should also be fine-tuned.
 
 The output mapping remains
 `sigmoid(bias + softplus(raw_xi) * zernike_disagreement)` so downstream label
 transfer receives a bounded risk score. `raw_eta` is retained only for strict
 checkpoint compatibility and stays frozen because JS disagreement is disabled.
-Checkpoints are selected by minimum source-validation Risk ECE subject to the
-configured Dice tolerance; Risk Brier and segmentation ECE remain logged as
-secondary observations.
+Checkpoints are selected by minimum source-validation ordinary ECE subject to
+the configured Dice tolerance; Risk ECE and Risk Brier remain diagnostic
+observations.
 
 Standalone evaluation strengthens refinement only at test time with
 `evaluation.refine_strength_scale` (default `2.0`). With the default
@@ -153,9 +159,10 @@ training automatically.
 segmentation probabilities; `ece` is retained as an identical compatibility
 alias. `risk_ece` and `risk_brier` instead describe the bounded uncertainty
 score `u` and remain diagnostic fields in standalone evaluation. Evaluation
-metadata identifies `basic_ece` as its calibration metric, while training-time
-calibration checkpoints continue to be selected by minimum source-validation
-`risk_ece`, subject to the configured Dice tolerance.
+metadata identifies `basic_ece` as its calibration metric. Training-time
+calibration checkpoints are selected by minimum source-validation ordinary
+`ece`, subject to the configured Dice tolerance; Risk ECE and Risk Brier are
+logged but do not participate in checkpoint selection.
 
 Validation calibration statistics use a deterministic reservoir capped by
 `evaluation.max_metric_voxels`, so their host-memory cost does not grow with the
