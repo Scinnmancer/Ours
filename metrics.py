@@ -428,10 +428,15 @@ def evaluate_case(
     risk_error = 1.0 - risk_correct
     risk_metrics = risk_calibration_metrics(uncertainty_values, risk_correct, bins)
     risk_metrics["risk_brier"] = risk_brier
+    basic_ece = expected_calibration_error(confidence, correct, bins)
     result: dict[str, Any] = {
         "mean_dice": float(np.nanmean(dice)),
         "mean_hd95": float(np.nanmean(hd95)),
-        "ece": expected_calibration_error(confidence, correct, bins),
+        # Ordinary top-label multiclass ECE of the segmentation probabilities.
+        # Keep ``ece`` as a compatibility alias for existing result readers;
+        # ``basic_ece`` makes the distinction from uncertainty risk ECE explicit.
+        "basic_ece": basic_ece,
+        "ece": basic_ece,
         "brier": brier,
         "auroc_error": auroc(risk_error, uncertainty_values),
         "aupr_error": aupr(risk_error, uncertainty_values),

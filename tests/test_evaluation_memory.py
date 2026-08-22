@@ -2,7 +2,12 @@ import numpy as np
 import pytest
 import torch
 
-from ours.metrics import _sample_mask_indices, evaluate_case, hd95_per_region
+from ours.metrics import (
+    _sample_mask_indices,
+    evaluate_case,
+    expected_calibration_error,
+    hd95_per_region,
+)
 from ours.probability import atomic_to_regions
 
 
@@ -132,3 +137,29 @@ def test_exact_aggregate_metrics_are_not_limited_by_ranking_sample_size():
 
     assert result["brier"] == pytest.approx(float(expected_brier))
     assert result["risk_brier"] == pytest.approx(float(expected_risk_brier))
+
+
+def test_evaluate_case_reports_basic_ece_separately_from_risk_ece():
+    probability = torch.tensor(
+        [
+            [
+                [[[0.80, 0.10, 0.20, 0.10]]],
+                [[[0.10, 0.70, 0.10, 0.10]]],
+                [[[0.05, 0.10, 0.60, 0.20]]],
+                [[[0.05, 0.10, 0.10, 0.60]]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    uncertainty = torch.tensor([[[[[0.10, 0.20, 0.30, 0.40]]]]])
+    scalar_target = torch.tensor([[[[[0, 1, 2, 4]]]]], dtype=torch.uint8)
+
+    result = evaluate_case(probability, uncertainty, scalar_target, max_voxels=100)
+    confidence = np.asarray([0.70, 0.60, 0.60], dtype=np.float32)
+    correct = np.ones(3, dtype=np.float32)
+    expected = expected_calibration_error(confidence, correct, bins=15)
+
+    assert result["basic_ece"] == pytest.approx(expected)
+    assert result["ece"] == pytest.approx(result["basic_ece"])
+    assert "risk_ece" in result
+    assert result["basic_ece"] != pytest.approx(result["risk_ece"])

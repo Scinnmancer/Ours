@@ -106,6 +106,7 @@ def _summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for key in (
             "mean_dice",
             "mean_hd95",
+            "basic_ece",
             "ece",
             "brier",
             "risk_ece",
@@ -188,7 +189,11 @@ def _evaluate_batch(
     case_rows: list[dict[str, Any]] = [
         {"domain": domain, "prediction": "base", "case": case, **base_metrics}
     ]
-    print(f"{domain} {index + 1}/{batch_count} {case} base dice={base_metrics['mean_dice']:.4f}")
+    print(
+        f"{domain} {index + 1}/{batch_count} {case} "
+        f"base dice={base_metrics['mean_dice']:.4f} "
+        f"basic_ece={base_metrics['basic_ece']:.4f}"
+    )
     del base_atomic_probability, base_region_prediction, base_metrics
 
     refined_atomic_probability = _required_cpu_tensor(refined_atomic_device, "refined atomic probability")
@@ -207,7 +212,11 @@ def _evaluate_batch(
         **metric_options,
     )
     case_rows.append({"domain": domain, "prediction": "refined", "case": case, **refined_metrics})
-    print(f"{domain} {index + 1}/{batch_count} {case} refined dice={refined_metrics['mean_dice']:.4f}")
+    print(
+        f"{domain} {index + 1}/{batch_count} {case} "
+        f"refined dice={refined_metrics['mean_dice']:.4f} "
+        f"basic_ece={refined_metrics['basic_ece']:.4f}"
+    )
     if bool(evaluation.get("save_nifti", False)):
         scalar = atomic_label_to_scalar(refined_atomic_prediction).numpy().astype(np.uint8)
         prediction_dir = output / "nifti" / domain
@@ -240,6 +249,7 @@ def run_evaluation(config: dict[str, Any], checkpoint: str, output_dir: str | No
                 "stage": payload.get("stage"),
                 "epoch": payload.get("epoch"),
                 "uncertainty_source": "zernike_disagreement",
+                "evaluation_calibration_metric": "basic_ece",
                 **refinement,
             },
             stream,

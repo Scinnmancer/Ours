@@ -149,10 +149,13 @@ events are disabled by default and can be enabled with
 `monitoring.batch_interval=N`. Plateau detections are advisory and never stop
 training automatically.
 
-`ece` and `brier` evaluate the four-class segmentation probabilities.
-`risk_ece` and `risk_brier` describe the bounded score `u`; error AUROC/AUPR are
-retained as diagnostic outputs only. Calibration checkpoints are selected by
-minimum source-validation `risk_ece`, subject to the configured Dice tolerance.
+`basic_ece` is the ordinary top-label multiclass ECE of the four-class
+segmentation probabilities; `ece` is retained as an identical compatibility
+alias. `risk_ece` and `risk_brier` instead describe the bounded uncertainty
+score `u` and remain diagnostic fields in standalone evaluation. Evaluation
+metadata identifies `basic_ece` as its calibration metric, while training-time
+calibration checkpoints continue to be selected by minimum source-validation
+`risk_ece`, subject to the configured Dice tolerance.
 
 Validation calibration statistics use a deterministic reservoir capped by
 `evaluation.max_metric_voxels`, so their host-memory cost does not grow with the
