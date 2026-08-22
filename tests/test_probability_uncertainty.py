@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 import torch.nn as nn
 
 from ours.checkpoint import load_checkpoint, save_checkpoint
-from ours.losses import balanced_pairwise_ranking_loss
+from ours.losses import risk_brier_loss
 from ours.model import DualHeadOutput, DualHeadSwinUNETR
 from ours.probability import independent_logits_to_atomic, independent_logits_to_regions
 from ours.train import (
     _make_scaler,
     _save_uncertainty_batch,
+    calibration_checkpoint_key,
     encoder_state_sha256,
     configure_calibration_trainability,
     train_epoch,
@@ -34,7 +36,7 @@ def _config() -> dict:
             "eta_init": 1.0,
             "xi_init": 1.0,
             "bias_init": -2.0,
-            "max_balanced_samples": 128,
+            "lambda_u": 1.0,
         },
         "label_transfer": {"radius": 1, "sigma": 1.0, "alpha_max": 0.2},
         "training": {
@@ -171,18 +173,24 @@ def _toy_batch():
     }
 
 
-def test_pairwise_alignment_pushes_error_scores_above_correct_scores():
-    disagreement = torch.tensor([0.1, 0.2, 0.8, 0.9], requires_grad=True)
-    error = torch.tensor([1.0, 1.0, 0.0, 0.0])
+def test_risk_brier_loss_fits_uncertainty_to_error_probability():
+    uncertainty = torch.tensor([0.1, 0.8], requires_grad=True)
+    error = torch.tensor([0.0, 1.0])
 
-    loss = balanced_pairwise_ranking_loss(disagreement, error, max_pairs=2)
+    loss = risk_brier_loss(uncertainty, error)
     loss.backward()
 
-    assert float(disagreement.grad[:2].max()) < 0.0
-    assert float(disagreement.grad[2:].min()) > 0.0
+    torch.testing.assert_close(loss, torch.tensor(0.025))
+    assert float(uncertainty.grad[0]) > 0.0
+    assert float(uncertainty.grad[1]) < 0.0
 
 
-def test_legacy_frozen_flag_maps_to_head_alignment_with_fixed_fusion():
+def test_risk_brier_loss_requires_aligned_shapes():
+    with pytest.raises(ValueError, match="identical shapes"):
+        risk_brier_loss(torch.zeros(2), torch.zeros(1, 2))
+
+
+def test_legacy_frozen_flag_maps_to_head_risk_calibration():
     model = _RiskOnlyToyModel()
     parameters = configure_calibration_trainability(model, True)
     optimizer = torch.optim.AdamW(parameters, lr=1e-3)
@@ -203,7 +211,7 @@ def test_legacy_frozen_flag_maps_to_head_alignment_with_fixed_fusion():
     )
 
     assert model.observed_training is False
-    assert model.observed_second_view is None
+    torch.testing.assert_close(model.observed_second_view, _toy_batch()["image_view2"])
     assert encoder_state_sha256(model) == encoder_before
     assert not torch.equal(model.head1.weight.detach(), head_before)
     assert {name for name, parameter in model.named_parameters() if parameter.requires_grad} == {
@@ -211,6 +219,8 @@ def test_legacy_frozen_flag_maps_to_head_alignment_with_fixed_fusion():
         "head1.bias",
         "head2.weight",
         "head2.bias",
+        "fusion.raw_xi",
+        "fusion.bias",
     }
 
 
@@ -219,8 +229,8 @@ def test_joint_calibration_keeps_geometry_and_disables_eta():
     configure_calibration_trainability(model, "full")
     assert model.encoder.weight.requires_grad
     assert model.head1.weight.requires_grad
-    assert not model.fusion.raw_xi.requires_grad
-    assert not model.fusion.bias.requires_grad
+    assert model.fusion.raw_xi.requires_grad
+    assert model.fusion.bias.requires_grad
     assert not model.fusion.raw_eta.requires_grad
 
 
@@ -236,8 +246,8 @@ def test_head_only_calibration_trains_decoder_heads_and_keeps_encoder_frozen(mon
         for name, parameter in model.named_parameters()
         if name.startswith(model.ENCODER_PREFIXES)
     )
-    assert not model.fusion.raw_xi.requires_grad
-    assert not model.fusion.bias.requires_grad
+    assert model.fusion.raw_xi.requires_grad
+    assert model.fusion.bias.requires_grad
     assert not model.fusion.raw_eta.requires_grad
     assert encoder_state_sha256(model) == before
 
@@ -248,6 +258,7 @@ def test_head_only_calibration_updates_heads_but_not_encoder():
     optimizer = torch.optim.AdamW(parameters, lr=1e-3)
     encoder_before = encoder_state_sha256(model)
     head_before = model.head1.weight.detach().clone()
+    fusion_bias_before = model.fusion.bias.detach().clone()
     train_epoch(
         model,
         [_toy_batch()],
@@ -263,11 +274,25 @@ def test_head_only_calibration_updates_heads_but_not_encoder():
     )
 
     assert model.observed_training is False
-    assert model.head1.training is False
-    assert model.head2.training is False
-    assert model.observed_second_view is None
+    assert model.head1.training is True
+    assert model.head2.training is True
+    torch.testing.assert_close(model.observed_second_view, _toy_batch()["image_view2"])
     assert encoder_state_sha256(model) == encoder_before
     assert not torch.equal(model.head1.weight.detach(), head_before)
+    assert not torch.equal(model.fusion.bias.detach(), fusion_bias_before)
+
+
+def test_calibration_checkpoint_key_prioritizes_risk_ece_then_brier_then_dice():
+    best_ece = {"risk_ece": 0.04, "risk_brier": 0.20, "mean_dice": 0.75}
+    worse_ece = {"risk_ece": 0.05, "risk_brier": 0.10, "mean_dice": 0.90}
+    same_ece_better_brier = {"risk_ece": 0.04, "risk_brier": 0.19, "mean_dice": 0.70}
+    same_ece_brier_better_dice = {"risk_ece": 0.04, "risk_brier": 0.19, "mean_dice": 0.80}
+
+    assert calibration_checkpoint_key(best_ece) < calibration_checkpoint_key(worse_ece)
+    assert calibration_checkpoint_key(same_ece_better_brier) < calibration_checkpoint_key(best_ece)
+    assert calibration_checkpoint_key(same_ece_brier_better_dice) < calibration_checkpoint_key(
+        same_ece_better_brier
+    )
 
 
 def test_uncertainty_snapshot_contains_zernike_component_only(tmp_path):

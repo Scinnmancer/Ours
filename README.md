@@ -1,11 +1,10 @@
 # Dual-head Swin UNETR with Zernike geometric reliability
 
-This package implements a Zernike geometric-disagreement alignment path
-without modifying the reference implementation in `baseline/`. Jensen-Shannon
-probability disagreement is not computed or used by alignment, Z0 fitting, or
-evaluation. The fixed monotonic fusion remains in the state layout and maps raw
-disagreement into `[0, 1]` for label transfer, but its parameters are not fitted
-during alignment.
+This package implements Zernike geometric-disagreement risk calibration without
+modifying the reference implementation in `baseline/`. Jensen-Shannon
+probability disagreement is not computed or used by calibration, Z0 fitting, or
+evaluation. A monotonic fusion maps raw disagreement into `[0, 1]` and is fitted
+with voxel-wise error targets during calibration.
 
 ## Probability convention
 
@@ -88,21 +87,23 @@ python -m ours.train --config ours/configs/brats2020.yaml --stage calibration \
 ```
 
 Calibration defaults to `training.calibration_trainable_scope=heads`: the shared
-encoder and fusion parameters stay frozen while both decoder heads are optimized
-with the segmentation loss plus a direct pairwise ranking loss. Each error voxel
-is paired with a correct voxel and the loss requires the error voxel to have the
-higher raw Zernike disagreement. The default alignment weight is a constant
-`lambda_u=0.5`; it is not ramped. Both heads receive the same unaugmented image
-with dropout disabled, matching deterministic inference. The encoder hash is
-checked before and after this mode. Set the scope to `full` only when the shared
+encoder stays frozen while both decoder heads and the active fusion parameters
+`raw_xi` and `bias` are optimized. The two heads receive independently augmented
+intensity views and keep their independent `Dropout3d` modules active. Risk is
+computed as `u = sigmoid(bias + softplus(raw_xi) * zernike_disagreement)`, and the
+calibration term is the mean `(u - error)^2` over the union of predicted and true
+tumor voxels. The total loss is the sum of both heads' Dice losses plus this Brier
+term with constant `lambda_u=1.0`; it is not ramped. The encoder hash is checked
+before and after calibration. Set the scope to `full` only when the shared
 segmentation network should also be fine-tuned.
 
-The fixed output mapping remains
+The output mapping remains
 `sigmoid(bias + softplus(raw_xi) * zernike_disagreement)` so downstream label
-transfer receives a bounded score. `raw_eta` is retained only for checkpoint
-compatibility. Checkpoints are selected by error-detection AUPR subject to the
-configured Dice tolerance; Risk ECE is descriptive and is not the optimization
-or selection target.
+transfer receives a bounded risk score. `raw_eta` is retained only for strict
+checkpoint compatibility and stays frozen because JS disagreement is disabled.
+Checkpoints are selected by minimum source-validation Risk ECE subject to the
+configured Dice tolerance; Risk Brier and segmentation ECE remain logged as
+secondary observations.
 
 Standalone evaluation strengthens refinement only at test time with
 `evaluation.refine_strength_scale` (default `2.0`). With the default
@@ -138,8 +139,8 @@ configuration, command, source/split/checkpoint fingerprints, split overlap
 counts, library/CUDA/GPU metadata, and determinism state. `events.jsonl` records
 per-epoch timing, learning rate, memory, parameter/gradient health, per-head and
 ensemble region Dice/volume fractions, head disagreement, AMP skipped steps,
-Zernike statistic health, disagreement alignment, uncertainty
-calibration/discrimination, fixed fusion parameters, checkpoint selection,
+Zernike statistic health, Brier risk alignment, uncertainty calibration,
+trainable fusion parameters, checkpoint selection,
 frozen encoder hashes, plateau advisories, and terminal status.
 No subject identifiers or voxel data are written to telemetry events.
 
@@ -149,10 +150,9 @@ events are disabled by default and can be enabled with
 training automatically.
 
 `ece` and `brier` evaluate the four-class segmentation probabilities.
-`risk_ece` and `risk_brier` describe the fixed bounded score `u`; error
-AUROC/AUPR use `u` against errors in the base prediction. Alignment checkpoints
-are selected by maximum source-validation error AUPR, subject to the configured
-Dice tolerance.
+`risk_ece` and `risk_brier` describe the bounded score `u`; error AUROC/AUPR are
+retained as diagnostic outputs only. Calibration checkpoints are selected by
+minimum source-validation `risk_ece`, subject to the configured Dice tolerance.
 
 Validation calibration statistics use a deterministic reservoir capped by
 `evaluation.max_metric_voxels`, so their host-memory cost does not grow with the

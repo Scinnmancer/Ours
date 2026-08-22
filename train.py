@@ -16,7 +16,7 @@ from .checkpoint import load_checkpoint, save_checkpoint
 from .config import load_config
 from .data import brain_mask, build_loader, generate_splits
 from .inference import autocast_context, infer_volume
-from .losses import RegionDiceLoss, balanced_pairwise_ranking_loss
+from .losses import RegionDiceLoss, risk_brier_loss
 from .metrics import MetricSampleReservoir, aupr, auroc, expected_calibration_error, risk_calibration_metrics
 from .model import DualHeadOutput, DualHeadSwinUNETR
 from .monitoring import TrainingTelemetry, gradient_statistics
@@ -166,16 +166,24 @@ def calibration_trainable_scope(config: dict[str, Any]) -> str:
     return "heads" if bool(config["training"].get("freeze_segmentation_during_calibration", True)) else "full"
 
 
+def calibration_checkpoint_key(metrics: dict[str, Any]) -> tuple[float, float, float]:
+    """Order eligible checkpoints by Risk ECE, Risk Brier, then Dice."""
+    risk_ece = float(metrics.get("risk_ece", math.inf))
+    risk_brier = float(metrics.get("risk_brier", math.inf))
+    mean_dice = float(metrics.get("mean_dice", -math.inf))
+    return risk_ece, risk_brier, -mean_dice
+
+
 def configure_calibration_trainability(
     model: DualHeadSwinUNETR,
     scope: str | bool,
 ) -> list[torch.nn.Parameter]:
-    """Select head-only or full disagreement-alignment parameters.
+    """Select head-only or full risk-calibration parameters.
 
     ``bool`` is accepted for legacy callers: ``True`` is ``heads`` and
-    ``False`` is ``full``. Fusion parameters stay fixed because this stage
-    aligns raw Zernike disagreement with segmentation errors; it does not fit
-    a second-stage probability calibration.
+    ``False`` is ``full``. The active Zernike scale and bias are always fitted;
+    legacy ``raw_eta`` remains frozen because probability disagreement is not
+    part of the active risk model.
     """
     if isinstance(scope, bool):
         scope = "heads" if scope else "full"
@@ -183,7 +191,9 @@ def configure_calibration_trainability(
         raise ValueError(f"Unsupported calibration trainable scope: {scope}")
     for name, parameter in model.named_parameters():
         trainable = name.startswith(("head1.", "head2.")) if scope == "heads" else True
-        if name.startswith("fusion."):
+        if name in {"fusion.raw_xi", "fusion.bias"}:
+            trainable = True
+        elif name == "fusion.raw_eta":
             trainable = False
         parameter.requires_grad_(trainable)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
@@ -209,9 +219,12 @@ def train_epoch(
 ) -> dict[str, Any]:
     scope = calibration_scope or ("heads" if freeze_segmentation else "full")
     if stage == "calibration":
-        # Keep dropout and all other train/eval-sensitive behavior identical to
-        # deterministic inference while retaining gradients for trainable heads.
+        # Keep the frozen encoder deterministic while enabling each decoder's
+        # independent Dropout3d during calibration.
         model.eval()
+        model.head1.train()
+        model.head2.train()
+        model.fusion.train()
     else:
         model.train()
     started = time.perf_counter()
@@ -220,7 +233,8 @@ def train_epoch(
         "segmentation": 0.0,
         "head1_loss": 0.0,
         "head2_loss": 0.0,
-        "alignment": 0.0,
+        "calibration_brier": 0.0,
+        "weighted_calibration_brier": 0.0,
         "head_region_l1": 0.0,
         "gradient_l2": 0.0,
         "gradient_abs_max": 0.0,
@@ -243,8 +257,8 @@ def train_epoch(
     for index, batch in enumerate(loader):
         batch_started = time.perf_counter()
         if stage == "calibration":
-            image1 = batch["image"].to(device, non_blocking=True)
-            image2 = None
+            image1 = batch["image_view1"].to(device, non_blocking=True)
+            image2 = batch["image_view2"].to(device, non_blocking=True)
         else:
             image1 = batch["image_view1"].to(device, non_blocking=True)
             image2 = batch["image_view2"].to(device, non_blocking=True)
@@ -256,24 +270,19 @@ def train_epoch(
             output = model(image1, image2, compute_uncertainty=compute_uncertainty)
             head_losses = [loss_function(logits, target) for logits in output.head_logits]
             segmentation = sum(head_losses)
-            alignment = torch.zeros((), device=device)
+            calibration_brier = torch.zeros((), device=device)
             if compute_uncertainty:
                 base_prediction = output.base_atomic_probability.argmax(dim=1)
                 error = (base_prediction != atomic_target).to(output.zernike_disagreement.dtype)
-                alignment_mask = (atomic_target > 0) | (base_prediction > 0)
-                if not bool(alignment_mask.any()):
-                    alignment_mask = torch.ones_like(alignment_mask, dtype=torch.bool)
-                alignment = balanced_pairwise_ranking_loss(
-                    output.zernike_disagreement[:, 0][alignment_mask],
-                    error[alignment_mask],
-                    max_pairs=int(
-                        config["uncertainty"].get(
-                            "max_alignment_pairs",
-                            int(config["uncertainty"].get("max_balanced_samples", 65536)) // 2,
-                        )
-                    ),
+                calibration_mask = (atomic_target > 0) | (base_prediction > 0)
+                if not bool(calibration_mask.any()):
+                    calibration_mask = torch.ones_like(calibration_mask, dtype=torch.bool)
+                calibration_brier = risk_brier_loss(
+                    output.uncertainty[:, 0][calibration_mask],
+                    error[calibration_mask],
                 )
-            loss = segmentation + lambda_u * alignment
+            weighted_calibration_brier = lambda_u * calibration_brier
+            loss = segmentation + weighted_calibration_brier
         scale_before = float(scaler.get_scale())
         scaler.scale(loss).backward()
         sample_gradient = (index + 1) % gradient_interval == 0 or index + 1 == len(loader)
@@ -289,7 +298,8 @@ def train_epoch(
         totals["segmentation"] += float(segmentation.detach())
         totals["head1_loss"] += float(head_losses[0].detach())
         totals["head2_loss"] += float(head_losses[1].detach())
-        totals["alignment"] += float(alignment.detach())
+        totals["calibration_brier"] += float(calibration_brier.detach())
+        totals["weighted_calibration_brier"] += float(weighted_calibration_brier.detach())
         if gradient is not None:
             totals["gradient_l2"] += float(gradient["gradient_l2"])
             totals["gradient_abs_max"] = max(totals["gradient_abs_max"], float(gradient["gradient_abs_max"]))
@@ -331,14 +341,17 @@ def train_epoch(
                 duration_seconds=time.perf_counter() - batch_started,
                 loss=float(loss.detach()),
                 segmentation=float(segmentation.detach()),
-                alignment=float(alignment.detach()),
+                calibration_brier=float(calibration_brier.detach()),
+                weighted_calibration_brier=float(weighted_calibration_brier.detach()),
                 gradient=gradient,
                 amp_scale=scale_after,
                 amp_step_skipped=scale_after < scale_before,
             )
         print(
             f"batch {index + 1}/{len(loader)} loss={float(loss.detach()):.5f} "
-            f"seg={float(segmentation.detach()):.5f} alignment={float(alignment.detach()):.5f}",
+            f"seg={float(segmentation.detach()):.5f} "
+            f"calibration_brier={float(calibration_brier.detach()):.5f} "
+            f"weighted_calibration_brier={float(weighted_calibration_brier.detach()):.5f}",
             flush=True,
         )
     batches = max(len(loader), 1)
@@ -365,9 +378,12 @@ def train_epoch(
             )
     metrics["duration_seconds"] = time.perf_counter() - started
     metrics["lambda_u"] = float(lambda_u)
-    metrics["alignment_loss_weight"] = float(lambda_u)
+    metrics["calibration_loss_weight"] = float(lambda_u)
     metrics["freeze_segmentation"] = 0.0
     metrics["calibration_trainable_scope"] = scope
+    if compute_uncertainty:
+        metrics["fusion_xi"] = float(model.fusion.xi.detach())
+        metrics["fusion_bias"] = float(model.fusion.bias.detach())
     for index, group in enumerate(optimizer.param_groups):
         metrics[f"learning_rate_group_{index}"] = float(group["lr"])
     return metrics
@@ -831,10 +847,11 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             source_stage=source_payload.get("stage"),
             source_epoch=source_payload.get("epoch"),
             uncertainty_source="zernike_disagreement",
-            uncertainty_objective="pairwise_error_ranking",
+            uncertainty_objective="risk_brier",
             calibration_trainable_scope=calibration_scope,
             freeze_segmentation=freeze_segmentation,
-            fusion_frozen=True,
+            fusion_frozen=False,
+            calibration_input="independent_augmented_views_with_head_dropout",
             segmentation_sha256_before=segmentation_sha256_before,
             encoder_sha256_before=encoder_sha256_before,
         )
@@ -846,10 +863,10 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
         )
         scheduler = _scheduler(optimizer, epochs, min(5, epochs))
         scaler = _make_scaler(bool(config["training"].get("amp", True)) and device.type == "cuda")
-        best_disagreement_aupr = -math.inf
+        best_calibration_key: tuple[float, float, float] | None = None
         selected_this_run = False
         last_path = run_dir / "last_calibration.pt"
-        target_lambda = float(config["uncertainty"].get("lambda_u", 0.5))
+        target_lambda = float(config["uncertainty"].get("lambda_u", 1.0))
         for epoch in range(epochs):
             lambda_u = target_lambda
             train_metrics = train_epoch(
@@ -889,12 +906,12 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                     epoch=epoch + 1,
                 )
                 metrics["lambda_u"] = lambda_u
-                metrics["alignment_loss_weight"] = lambda_u
+                metrics["calibration_loss_weight"] = lambda_u
                 metrics["freeze_segmentation"] = freeze_segmentation
                 metrics["calibration_trainable_scope"] = calibration_scope
-                metrics["calibration_input"] = "same_unaugmented_image"
-                metrics["uncertainty_objective"] = "pairwise_error_ranking"
-                metrics["fusion_frozen"] = True
+                metrics["calibration_input"] = "independent_augmented_views_with_head_dropout"
+                metrics["uncertainty_objective"] = "risk_brier"
+                metrics["fusion_frozen"] = False
                 metrics["segmentation_sha256_before"] = segmentation_sha256_before
                 metrics["encoder_sha256_before"] = encoder_sha256_before
                 print(f"calibration epoch={epoch + 1} train={train_metrics} val={metrics}")
@@ -919,22 +936,34 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                 )
                 save_checkpoint(last_path, model, "calibration", epoch, config, optimizer, scheduler, metrics)
                 eligible = metrics["mean_dice"] >= reference_dice - float(config["training"].get("dice_tolerance", 0.01))
-                disagreement_aupr = float(metrics["zernike_disagreement_aupr"])
-                if eligible and math.isfinite(disagreement_aupr) and disagreement_aupr > best_disagreement_aupr:
-                    best_disagreement_aupr = disagreement_aupr
+                candidate_key = calibration_checkpoint_key(metrics)
+                finite_candidate = all(math.isfinite(value) for value in candidate_key)
+                if eligible and finite_candidate and (
+                    best_calibration_key is None or candidate_key < best_calibration_key
+                ):
+                    best_calibration_key = candidate_key
                     selected_this_run = True
                     save_checkpoint(calibrated_path, model, "calibration", epoch, config, optimizer, scheduler, metrics)
                     telemetry.event(
                         "best_checkpoint_saved",
                         stage="calibration",
                         epoch=epoch + 1,
-                        metric="zernike_disagreement_aupr",
-                        value=best_disagreement_aupr,
+                        metric="risk_ece",
+                        value=float(metrics["risk_ece"]),
+                        risk_brier=float(metrics["risk_brier"]),
                         mean_dice=metrics["mean_dice"],
                         path=str(calibrated_path),
                     )
         if not selected_this_run:
             shutil.copyfile(last_path, calibrated_path)
+            telemetry.event(
+                "anomaly",
+                severity="RED_FLAG",
+                type="no_dice_eligible_calibration_checkpoint",
+                reference_dice=reference_dice,
+                dice_tolerance=float(config["training"].get("dice_tolerance", 0.01)),
+                fallback=str(last_path),
+            )
         calibrated_payload = _load_required(calibrated_path, model)
         if "optimizer" in calibrated_payload:
             optimizer.load_state_dict(calibrated_payload["optimizer"])
@@ -960,8 +989,9 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             {
                 "z0": z0,
                 "uncertainty_source": "zernike_disagreement",
-                "uncertainty_objective": "pairwise_error_ranking",
-                "fusion_frozen": True,
+                "uncertainty_objective": "risk_brier",
+                "fusion_frozen": False,
+                "calibration_input": "independent_augmented_views_with_head_dropout",
                 "freeze_segmentation": freeze_segmentation,
                 "calibration_trainable_scope": calibration_scope,
                 "segmentation_sha256_before": segmentation_sha256_before,
@@ -984,7 +1014,7 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
         telemetry.event(
             "stage_finished",
             stage="calibration",
-            best_disagreement_aupr=best_disagreement_aupr,
+            best_risk_ece=(best_calibration_key[0] if best_calibration_key is not None else None),
             calibration_trainable_scope=calibration_scope,
             segmentation_sha256_before=segmentation_sha256_before,
             segmentation_sha256_after=segmentation_sha256_after,

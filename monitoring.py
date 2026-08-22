@@ -330,12 +330,22 @@ class TrainingTelemetry:
 
     def validation_finished(self, stage: str, epoch: int, metrics: dict[str, Any]) -> None:
         self.event("validation_finished", stage=stage, epoch=epoch, metrics=metrics)
-        key = f"{stage}:mean_dice"
-        value = float(metrics.get("mean_dice", float("nan")))
+        primary_metric = "risk_ece" if stage == "calibration" else "mean_dice"
+        key = f"{stage}:{primary_metric}"
+        value = float(metrics.get(primary_metric, float("nan")))
         if not math.isfinite(value):
-            self.event("anomaly", severity="RED_FLAG", type="nonfinite_metric", stage=stage, epoch=epoch)
+            self.event(
+                "anomaly",
+                severity="RED_FLAG",
+                type="nonfinite_metric",
+                stage=stage,
+                epoch=epoch,
+                metric=primary_metric,
+            )
             return
-        if value > self._best.get(key, -math.inf):
+        previous_best = self._best.get(key, math.inf if stage == "calibration" else -math.inf)
+        improved = value < previous_best if stage == "calibration" else value > previous_best
+        if improved:
             self._best[key] = value
             self._stale[key] = 0
             return
@@ -348,7 +358,7 @@ class TrainingTelemetry:
                 type="metric_plateau",
                 stage=stage,
                 epoch=epoch,
-                primary_metric="mean_dice",
+                primary_metric=primary_metric,
                 best=self._best[key],
                 validations_without_improvement=self._stale[key],
             )

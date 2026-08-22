@@ -43,9 +43,8 @@ uncertainty:
   eta_init: 1.0
   xi_init: 1.0
   bias_init: -2.0
-  # Weight for direct pairwise alignment of Zernike disagreement with errors.
-  lambda_u: 0.5
-  max_alignment_pairs: 32768
+  # Weight for Brier alignment of Zernike-derived risk with voxel errors.
+  lambda_u: 1.0
 
 label_transfer:
   radius: 2
@@ -69,8 +68,8 @@ training:
   sw_batch_size: 4
   infer_overlap: 0.5
   dice_tolerance: 0.01
-  # Disagreement alignment updates only the two decoder heads by default; the
-  # shared encoder and fixed monotonic risk mapping remain frozen.
+  # Risk calibration updates both decoder heads plus fusion xi/bias by default;
+  # the shared encoder and legacy probability-disagreement eta remain frozen.
   # Valid values: heads, full.
   calibration_trainable_scope: heads
   # Legacy fallback when calibration_trainable_scope is omitted from an old config.
