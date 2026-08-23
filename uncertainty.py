@@ -47,56 +47,70 @@ def uncertainty_components(
     return zernike_disagreement, uncertainty
 
 
-def uncertainty_weighted_radial_gradient(
-    logits: torch.Tensor,
+def uncertainty_weighted_margin_loss(
+    atomic_probability: torch.Tensor,
     uncertainty: torch.Tensor,
-    confidence: torch.Tensor,
     mask: torch.Tensor | None = None,
     uncertainty_power: float = 2.0,
-    confidence_power: float = 2.0,
+    margin: float = 1.0,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Build a detached inward gradient for independent-sigmoid logits.
+    """Penalize excessive atomic-logit gaps using detached geometric risk.
 
-    The model emits independent ``[TC, WT, ET]`` logits, so zero—not a
-    channel-wise mean—is the uninformative point. Gradient descent subtracts
-    the returned vector and therefore contracts high-risk logits toward zero
-    without introducing parameters or changing the forward pass.
+    ``log(p + eps)`` is used as the four-class atomic logit bridge.  The
+    current top class and the geometric-moment uncertainty are detached, so
+    this objective can only update the prediction heads.  Positive ``margin``
+    leaves a non-zero class gap instead of continuously pushing predictions
+    toward a uniform distribution.
     """
-    if logits.ndim < 3 or logits.shape[1] != 3:
-        raise ValueError(f"Expected [B,3,...] logits, got {tuple(logits.shape)}")
-    expected_scalar_shape = (logits.shape[0], 1, *logits.shape[2:])
+    if atomic_probability.ndim < 3 or atomic_probability.shape[1] != 4:
+        raise ValueError(
+            "Expected four-class [B,4,...] atomic probabilities, got "
+            f"{tuple(atomic_probability.shape)}"
+        )
+    expected_scalar_shape = (
+        atomic_probability.shape[0],
+        1,
+        *atomic_probability.shape[2:],
+    )
     if tuple(uncertainty.shape) != expected_scalar_shape:
         raise ValueError(
             "uncertainty must have shape "
             f"{expected_scalar_shape}, got {tuple(uncertainty.shape)}"
         )
-    if tuple(confidence.shape) != expected_scalar_shape:
-        raise ValueError(
-            "confidence must have shape "
-            f"{expected_scalar_shape}, got {tuple(confidence.shape)}"
-        )
     if not math.isfinite(float(uncertainty_power)) or float(uncertainty_power) < 0.0:
         raise ValueError("uncertainty_power must be finite and non-negative")
-    if not math.isfinite(float(confidence_power)) or float(confidence_power) < 0.0:
-        raise ValueError("confidence_power must be finite and non-negative")
+    if not math.isfinite(float(margin)) or float(margin) <= 0.0:
+        raise ValueError("margin must be finite and positive")
     if not math.isfinite(float(eps)) or float(eps) <= 0.0:
         raise ValueError("eps must be finite and positive")
 
-    work_logits = logits.detach().float()
-    norm = torch.linalg.vector_norm(work_logits, dim=1, keepdim=True)
-    direction = work_logits / (norm + float(eps))
-    weight = (
-        uncertainty.detach().float().clamp(0.0, 1.0).pow(float(uncertainty_power))
-        * confidence.detach().float().clamp(0.0, 1.0).pow(float(confidence_power))
-    )
+    atomic_logits = atomic_probability.float().clamp_min(float(eps)).log()
+    top_index = atomic_logits.detach().argmax(dim=1, keepdim=True)
+    top_logit = atomic_logits.gather(1, top_index)
+    excessive_gap = F.relu(top_logit - atomic_logits - float(margin))
+    competitor = torch.ones_like(excessive_gap, dtype=torch.bool)
+    competitor.scatter_(1, top_index, False)
+    # Nested-region closure can create exact structural zeros.  Those classes
+    # have no usable local gradient through the atomic bridge, so including
+    # them would only push down the winner and could collapse the segmentation.
+    competitor &= atomic_probability.detach() > float(eps)
+    weighted_gap = excessive_gap * competitor.to(dtype=excessive_gap.dtype)
+    weight = uncertainty.detach().float().clamp(0.0, 1.0).pow(float(uncertainty_power))
+
     if mask is not None:
         detached_mask = mask.detach()
-        if detached_mask.ndim == logits.ndim - 1:
+        if detached_mask.ndim == atomic_probability.ndim - 1:
             detached_mask = detached_mask.unsqueeze(1)
         if tuple(detached_mask.shape) != expected_scalar_shape:
             raise ValueError(
                 f"mask must have shape {expected_scalar_shape} or omit the channel dimension"
             )
-        weight = weight * detached_mask.to(dtype=weight.dtype)
-    return (weight * direction).to(device=logits.device, dtype=logits.dtype)
+        voxel_mask = detached_mask.to(dtype=weighted_gap.dtype)
+    else:
+        voxel_mask = torch.ones_like(weight)
+
+    denominator = voxel_mask.sum()
+    if not bool(denominator > 0):
+        return atomic_probability.sum() * 0.0
+    return (weighted_gap * weight * voxel_mask).sum() / denominator

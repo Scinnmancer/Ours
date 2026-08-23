@@ -101,28 +101,30 @@ def validate_config(config: dict[str, Any]) -> None:
     calibration_weight = float(config["uncertainty"].get("lambda_u", 1.0))
     if not math.isfinite(calibration_weight) or calibration_weight < 0.0:
         raise ValueError("uncertainty.lambda_u must be finite and non-negative")
-    radial_gradient = config["uncertainty"].get("radial_gradient", {})
-    if not isinstance(radial_gradient, dict):
-        raise ValueError("uncertainty.radial_gradient must be a mapping")
-    radial_enabled = radial_gradient.get("enabled", False)
-    if not isinstance(radial_enabled, bool):
-        raise ValueError("uncertainty.radial_gradient.enabled must be a boolean")
-    radial_weight = float(radial_gradient.get("weight", 0.01))
-    if not math.isfinite(radial_weight) or radial_weight < 0.0:
-        raise ValueError("uncertainty.radial_gradient.weight must be finite and non-negative")
-    for key in ("uncertainty_power", "confidence_power"):
-        value = float(radial_gradient.get(key, 2.0))
-        if not math.isfinite(value) or value < 0.0:
-            raise ValueError(
-                f"uncertainty.radial_gradient.{key} must be finite and non-negative"
-            )
+    margin_gradient = config["uncertainty"].get("margin_gradient", {})
+    if not isinstance(margin_gradient, dict):
+        raise ValueError("uncertainty.margin_gradient must be a mapping")
+    margin_enabled = margin_gradient.get("enabled", False)
+    if not isinstance(margin_enabled, bool):
+        raise ValueError("uncertainty.margin_gradient.enabled must be a boolean")
+    margin_weight = float(margin_gradient.get("weight", 0.01))
+    if not math.isfinite(margin_weight) or margin_weight < 0.0:
+        raise ValueError("uncertainty.margin_gradient.weight must be finite and non-negative")
+    uncertainty_power = float(margin_gradient.get("uncertainty_power", 2.0))
+    if not math.isfinite(uncertainty_power) or uncertainty_power < 0.0:
+        raise ValueError(
+            "uncertainty.margin_gradient.uncertainty_power must be finite and non-negative"
+        )
+    margin = float(margin_gradient.get("margin", 1.0))
+    if not math.isfinite(margin) or margin <= 0.0:
+        raise ValueError("uncertainty.margin_gradient.margin must be finite and positive")
     freeze_calibration = config["training"].get("freeze_segmentation_during_calibration", True)
     if not isinstance(freeze_calibration, bool):
         raise ValueError("training.freeze_segmentation_during_calibration must be a boolean")
     calibration_scope = config["training"].get("calibration_trainable_scope")
-    if calibration_scope is not None and calibration_scope not in {"heads", "full"}:
+    if calibration_scope is not None and calibration_scope != "heads":
         raise ValueError(
-            "training.calibration_trainable_scope must be one of heads or full"
+            "training.calibration_trainable_scope must be heads for margin calibration"
         )
     if int(config["data"].get("workers", 8)) < 0:
         raise ValueError("data.workers must be a non-negative integer")

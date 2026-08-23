@@ -3,11 +3,12 @@
 This package implements Zernike geometric-disagreement risk calibration without
 modifying the reference implementation in `baseline/`. Jensen-Shannon
 probability disagreement is not computed or used by calibration, Z0 fitting, or
-evaluation. A monotonic fusion maps raw disagreement into `[0, 1]` and is fitted
-with voxel-wise error targets during calibration.
+evaluation. A monotonic fusion maps raw disagreement into `[0, 1]`; calibration
+keeps that geometric uncertainty path frozen and uses its detached output to
+weight prediction-head updates.
 
 The calibration-only confidence intervention is documented in
-[`CALIBRATION_RADIAL_GRADIENT.md`](CALIBRATION_RADIAL_GRADIENT.md).
+[`CALIBRATION_MARGIN_GRADIENT.md`](CALIBRATION_MARGIN_GRADIENT.md).
 
 ## Probability convention
 
@@ -89,27 +90,25 @@ python -m ours.train --config ours/configs/brats2020.yaml --stage calibration \
   --checkpoint ours/runs/dual_swin_zernike_brats2020/best_seg.pt
 ```
 
-Calibration defaults to `training.calibration_trainable_scope=heads`: the shared
-encoder stays frozen while both decoder heads and the active fusion parameters
-`raw_xi` and `bias` are optimized. The two heads receive independently augmented
-intensity views and keep their independent `Dropout3d` modules active. Risk is
-computed as `u = sigmoid(bias + softplus(raw_xi) * zernike_disagreement)`, and the
-calibration term is the mean `(u - error)^2` over the union of predicted and true
-tumor voxels. The total loss is the sum of both heads' Dice losses plus this Brier
-term with constant `lambda_u=1.0`; it is not ramped. During calibration only, an
-additional detached gradient contracts each head's independent sigmoid logits
-toward zero with weight `lambda * u^beta * confidence^gamma`. The default radial
-coefficient is `0.01`; no scalar loss, model parameter, or inference operation is
-added. The encoder hash is checked before and after calibration. Set the scope to
-`full` only when the shared segmentation network should also be fine-tuned.
+Calibration uses `training.calibration_trainable_scope=heads`: both decoder
+prediction heads are optimized while the encoder, Zernike statistics,
+uncertainty fusion, and label-transfer module remain frozen. The two heads
+receive independently augmented intensity views and keep their independent
+`Dropout3d` modules active. Risk remains
+`u = sigmoid(bias + softplus(raw_xi) * zernike_disagreement)` and is detached to
+weight an atomic-logit margin penalty. The total training loss is both heads'
+Dice losses plus the weighted penalty on class gaps exceeding the configured
+positive margin. Risk Brier remains a diagnostic and does not participate in
+backward. No model parameter or inference operation is added.
 
 The output mapping remains
 `sigmoid(bias + softplus(raw_xi) * zernike_disagreement)` so downstream label
 transfer receives a bounded risk score. `raw_eta` is retained only for strict
 checkpoint compatibility and stays frozen because JS disagreement is disabled.
-Checkpoints are selected by minimum source-validation ordinary ECE subject to
-the configured Dice tolerance; Risk ECE and Risk Brier remain diagnostic
-observations.
+Checkpoints are selected only by minimum source-validation ordinary ECE after
+passing the configured Dice tolerance. Equal ECE keeps the earlier checkpoint;
+Risk ECE, Risk Brier, and Dice do not break ties. A run with no Dice-eligible
+checkpoint fails without relabeling `last_calibration.pt` as a best model.
 
 Standalone evaluation strengthens refinement only at test time with
 `evaluation.refine_strength_scale` (default `2.0`). With the default
@@ -146,8 +145,8 @@ counts, library/CUDA/GPU metadata, and determinism state. `events.jsonl` records
 per-epoch timing, learning rate, memory, parameter/gradient health, per-head and
 ensemble region Dice/volume fractions, head disagreement, AMP skipped steps,
 Zernike statistic health, Brier risk alignment, uncertainty calibration,
-trainable fusion parameters, checkpoint selection,
-frozen encoder hashes, plateau advisories, and terminal status.
+frozen fusion parameters, checkpoint selection, frozen non-head hashes,
+plateau advisories, and terminal status.
 No subject identifiers or voxel data are written to telemetry events.
 
 Monitoring overhead is controlled by `monitoring.gradient_interval`; batch-level

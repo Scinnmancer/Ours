@@ -330,7 +330,7 @@ class TrainingTelemetry:
 
     def validation_finished(self, stage: str, epoch: int, metrics: dict[str, Any]) -> None:
         self.event("validation_finished", stage=stage, epoch=epoch, metrics=metrics)
-        primary_metric = "risk_ece" if stage == "calibration" else "mean_dice"
+        primary_metric = "ece" if stage == "calibration" else "mean_dice"
         key = f"{stage}:{primary_metric}"
         value = float(metrics.get(primary_metric, float("nan")))
         if not math.isfinite(value):
