@@ -141,7 +141,7 @@ def segmentation_state_sha256(model: DualHeadSwinUNETR) -> str:
         digest.update(key.encode("utf-8"))
         digest.update(str(tensor.dtype).encode("ascii"))
         digest.update(str(tuple(tensor.shape)).encode("ascii"))
-        digest.update(tensor.view(torch.uint8).numpy().tobytes())
+        digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
 
 
@@ -154,7 +154,7 @@ def encoder_state_sha256(model: DualHeadSwinUNETR) -> str:
         tensor = value.detach().cpu().contiguous()
         digest.update(key.encode("utf-8"))
         digest.update(str(tuple(tensor.shape)).encode("ascii"))
-        digest.update(tensor.view(torch.uint8).numpy().tobytes())
+        digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
 
 
@@ -168,7 +168,7 @@ def frozen_calibration_state_sha256(model: DualHeadSwinUNETR) -> str:
         digest.update(key.encode("utf-8"))
         digest.update(str(tensor.dtype).encode("ascii"))
         digest.update(str(tuple(tensor.shape)).encode("ascii"))
-        digest.update(tensor.view(torch.uint8).numpy().tobytes())
+        digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
 
 
