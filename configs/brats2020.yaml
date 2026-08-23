@@ -35,7 +35,8 @@ model:
 zernike:
   windows: [3, 5, 7]
   orders: [[0, 0], [1, 1], [2, 0], [2, 2]]
-  chunk_depth: 32
+  # Exact halo-preserving chunks; smaller depth lowers calibration peak VRAM.
+  chunk_depth: 16
   stats_max_batches: 0
 
 uncertainty:
@@ -71,7 +72,8 @@ training:
   weight_decay: 0.00001
   scheduler_warmup_epochs: 20
   amp: true
-  sw_batch_size: 4
+  # Sliding-window validation concurrency only; does not change the objective.
+  sw_batch_size: 1
   infer_overlap: 0.5
   dice_tolerance: 0.01
   # Margin calibration updates only the two decoder prediction heads.

@@ -12,6 +12,10 @@ u = sigmoid(bias + softplus(raw_xi) * zernike_disagreement)
 The calibration stage detaches `u` and uses it only as a voxel weight. It does
 not refit the uncertainty fusion. Only `head1` and `head2` are trainable; the
 encoder, Zernike statistics, fusion, and label-transfer module remain frozen.
+Because the objective is explicitly `stopgrad(u^beta)`, calibration computes
+the unchanged Zernike disagreement and fusion formula under `torch.no_grad()`
+from detached atomic probabilities. This avoids retaining the multi-scale 3D
+convolution graph; it does not change `u`, the loss, or the head gradients.
 
 For the base four-class atomic probability `p`, define atomic logits
 `a = log(p + eps)` and detached top class `k* = argmax(a)`. On the union `M` of
@@ -43,6 +47,11 @@ uncertainty:
 
 Legacy configurations without `margin_gradient` leave the margin objective
 disabled. The feature adds no model parameter and does not change `state_dict`.
+
+The BraTS 2020 configuration uses `zernike.chunk_depth: 16` with the existing
+halo-preserving chunk implementation and `training.sw_batch_size: 1`. These
+settings reduce training and validation peak VRAM respectively without changing
+the geometric-moment definition or calibration objective.
 
 ## Checkpoint selection
 

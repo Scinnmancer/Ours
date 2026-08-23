@@ -14,6 +14,7 @@ from ours.train import (
     _make_scaler,
     _save_uncertainty_batch,
     calibration_checkpoint_key,
+    detached_geometric_uncertainty,
     encoder_state_sha256,
     frozen_calibration_state_sha256,
     configure_calibration_trainability,
@@ -138,6 +139,8 @@ class _RiskOnlyToyModel(nn.Module):
         self.encoder = nn.Conv3d(1, 1, 1)
         self.head1 = nn.Conv3d(1, 3, 1)
         self.head2 = nn.Conv3d(1, 3, 1)
+        self.zernike = _ToyZernike()
+        self.zernike_stats = nn.Identity()
         self.fusion = UncertaintyFusion()
         with torch.no_grad():
             self.encoder.weight.fill_(1.0)
@@ -148,10 +151,12 @@ class _RiskOnlyToyModel(nn.Module):
             self.head2.bias.fill_(-4.0)
         self.observed_training = None
         self.observed_second_view = None
+        self.observed_compute_uncertainty = None
 
     def forward(self, image, second_view=None, compute_uncertainty=False):
         self.observed_training = self.training
         self.observed_second_view = second_view
+        self.observed_compute_uncertainty = compute_uncertainty
         logits1 = self.head1(self.encoder(image))
         logits2 = self.head2(self.encoder(image if second_view is None else second_view))
         regions1 = independent_logits_to_regions(logits1)
@@ -166,15 +171,37 @@ class _RiskOnlyToyModel(nn.Module):
             base_atomic_probability=base,
         )
         if compute_uncertainty:
-            disagreement = (atomic1 - atomic2).abs().mean(dim=1, keepdim=True) + 0.1
+            disagreement = self.zernike.disagreement(atomic1, atomic2, self.zernike_stats)
             result.zernike_disagreement = disagreement
             result.uncertainty = self.fusion(disagreement)
         return result
 
 
+class _ToyZernike(nn.Module):
+    def disagreement(self, atomic1, atomic2, statistics):
+        del statistics
+        return (atomic1 - atomic2).abs().mean(dim=1, keepdim=True) + 0.1
+
+
 class _ZeroSegmentationLoss(nn.Module):
     def forward(self, logits, target):
         return (logits * 0.0).sum()
+
+
+def test_detached_geometric_uncertainty_matches_original_path_without_a_graph():
+    model = _RiskOnlyToyModel()
+    image1 = torch.randn(1, 1, 2, 2, 2)
+    image2 = torch.randn(1, 1, 2, 2, 2)
+
+    original = model(image1, image2, compute_uncertainty=True)
+    detached_output = model(image1, image2, compute_uncertainty=False)
+    disagreement, uncertainty = detached_geometric_uncertainty(model, detached_output)
+
+    torch.testing.assert_close(disagreement, original.zernike_disagreement.detach())
+    torch.testing.assert_close(uncertainty, original.uncertainty.detach())
+    assert detached_output.base_atomic_probability.requires_grad
+    assert not disagreement.requires_grad
+    assert not uncertainty.requires_grad
 
 
 def _toy_batch():
@@ -303,6 +330,7 @@ def test_legacy_frozen_flag_maps_to_head_only_margin_calibration():
     )
 
     assert model.observed_training is False
+    assert model.observed_compute_uncertainty is False
     torch.testing.assert_close(model.observed_second_view, _toy_batch()["image_view2"])
     assert encoder_state_sha256(model) == encoder_before
     assert not torch.equal(model.head1.weight.detach(), head_before)
@@ -361,6 +389,7 @@ def test_head_only_calibration_updates_heads_but_not_encoder():
     )
 
     assert model.observed_training is False
+    assert model.observed_compute_uncertainty is False
     assert model.head1.training is True
     assert model.head2.training is True
     torch.testing.assert_close(model.observed_second_view, _toy_batch()["image_view2"])

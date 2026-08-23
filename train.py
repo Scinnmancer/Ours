@@ -20,7 +20,7 @@ from .metrics import MetricSampleReservoir, aupr, auroc, expected_calibration_er
 from .model import DualHeadOutput, DualHeadSwinUNETR
 from .monitoring import TrainingTelemetry, gradient_statistics
 from .reproducibility import save_run_metadata, set_reproducibility
-from .uncertainty import uncertainty_weighted_margin_loss
+from .uncertainty import uncertainty_components, uncertainty_weighted_margin_loss
 from .zernike import WelfordAccumulator
 
 
@@ -185,6 +185,20 @@ def calibration_checkpoint_key(metrics: dict[str, Any]) -> float:
     return float(metrics.get("basic_ece", metrics.get("ece", math.inf)))
 
 
+def detached_geometric_uncertainty(
+    model: DualHeadSwinUNETR,
+    output: DualHeadOutput,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute the stop-gradient geometric risk without retaining its 3D conv graph."""
+    with torch.no_grad():
+        zernike_disagreement = model.zernike.disagreement(
+            output.head_atomic_probabilities[0].detach(),
+            output.head_atomic_probabilities[1].detach(),
+            model.zernike_stats,
+        )
+        return uncertainty_components(zernike_disagreement, model.fusion)
+
+
 def configure_calibration_trainability(
     model: DualHeadSwinUNETR,
     scope: str | bool,
@@ -277,7 +291,16 @@ def train_epoch(
         optimizer.zero_grad(set_to_none=True)
         with autocast_context(device, amp):
             compute_uncertainty = stage == "calibration" or lambda_u > 0.0
-            output = model(image1, image2, compute_uncertainty=compute_uncertainty)
+            # Calibration uses u only through stopgrad(u**beta).  Compute the
+            # identical geometric path without autograd so the multi-scale 3D
+            # Zernike convolutions do not retain a graph across all chunks.
+            output = model(
+                image1,
+                image2,
+                compute_uncertainty=compute_uncertainty and stage != "calibration",
+            )
+            if stage == "calibration":
+                output.zernike_disagreement, output.uncertainty = detached_geometric_uncertainty(model, output)
             head_losses = [loss_function(logits, target) for logits in output.head_logits]
             segmentation = sum(head_losses)
             calibration_brier = torch.zeros((), device=device)
