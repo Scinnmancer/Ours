@@ -99,8 +99,8 @@ receive independently augmented intensity views and keep their independent
 weight an atomic-logit margin penalty. The total training loss is both heads'
 Dice losses plus the weighted penalty on class gaps exceeding the configured
 margin. The default calibration run first overrides the fixed fusion mapping
-to `xi=9.0`, `bias=-2.8`, evaluates the unmodified heads as epoch 0, and then
-runs 15 epochs with validation every epoch. Dice controls checkpoint
+to `xi=8.0`, `bias=-4.8`, evaluates the unmodified heads as epoch 0, and then
+runs 50 epochs with validation every epoch. Dice controls checkpoint
 eligibility; ordinary segmentation ECE alone selects among eligible candidates,
 including epoch 0.
 Risk Brier remains a diagnostic and does not participate in

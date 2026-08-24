@@ -44,8 +44,8 @@ gradient; this prevents the penalty from reducing only the winning class.
 uncertainty:
   calibration_fusion:
     enabled: true
-    xi: 9.0
-    bias: -2.8
+    xi: 8.0
+    bias: -4.8
   margin_gradient:
     enabled: true
     weight: 0.02
@@ -53,7 +53,7 @@ uncertainty:
     margin: 1.0
 
 training:
-  calibration_epochs: 15
+  calibration_epochs: 50
   warmup_validation_every: 5
   validation_every: 1
 ```
@@ -64,9 +64,12 @@ fusion values loaded from their checkpoint. The override adds no model
 parameter and does not change `state_dict`, so old warmup checkpoints still
 load with `strict=True`.
 
-With the recommended mapping, `u(0.1625)` is approximately `0.208` and
-`u(0.3238)` is approximately `0.529`. Consequently, the squared uncertainty
-weight at the latter disagreement is about 6.5 times the former.
+The recommended mapping places the sigmoid midpoint at disagreement `0.6`:
+`u(0)=0.008`, `u(0.6)=0.5`, and `u(1.0)=0.961`. An offline remapping of the
+current epoch-10 validation maps estimates mean uncertainty near `0.528` for
+correct tumor voxels and `0.772` for error voxels, increasing their numerical
+gap while reducing saturation among correct voxels. These are diagnostic
+expectations rather than checkpoint eligibility conditions.
 
 The BraTS 2020 configuration uses `zernike.chunk_depth: 16` with the existing
 halo-preserving chunk implementation and `training.sw_batch_size: 1`. These
@@ -88,7 +91,7 @@ Before the first calibration update, the loaded model with the fixed fusion
 override is evaluated by the same validation path as epoch 0. If it passes the
 Dice guard, it becomes the initial ECE candidate. A training epoch replaces it
 only when its ordinary ECE is strictly lower, so calibration cannot discard a
-better starting model merely because all 15 training epochs are worse.
+better starting model merely because all 50 training epochs are worse.
 If no checkpoint is eligible, `last_calibration.pt` is retained for diagnosis,
 the stage fails, and neither `best_calibrated.pt` nor `final.pt` is produced by
 that run.
@@ -108,6 +111,6 @@ optimizer state are not resumed. If Zernike statistics are absent, the existing
 statistics fitting pass writes `stats_fitted.pt` before calibration starts. If
 checkpoint metadata has no finite `mean_dice`, the loaded warmup model is
 validated once to establish the Dice eligibility reference. After any fitted
-statistics checkpoint is reloaded, `xi=9.0` and `bias=-2.8` are applied when
+statistics checkpoint is reloaded, `xi=8.0` and `bias=-4.8` are applied when
 `calibration_fusion.enabled=true`; this ordering prevents checkpoint values
 from replacing the configured calibration mapping.

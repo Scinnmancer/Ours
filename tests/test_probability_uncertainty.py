@@ -140,25 +140,28 @@ def test_calibration_fusion_override_preserves_state_layout_and_sets_recommended
     config = _config()
     config["uncertainty"]["calibration_fusion"] = {
         "enabled": True,
-        "xi": 9.0,
-        "bias": -2.8,
+        "xi": 8.0,
+        "bias": -4.8,
     }
 
     metadata = apply_calibration_fusion_override(model, config)
-    disagreement = torch.tensor([0.1625, 0.3238]).reshape(2, 1, 1, 1, 1)
+    disagreement = torch.tensor([0.0, 0.6, 1.0]).reshape(3, 1, 1, 1, 1)
     uncertainty = model.fusion(disagreement).flatten()
 
     assert tuple(model.state_dict()) == state_keys
     assert metadata["enabled"] is True
-    assert metadata["effective_xi"] == pytest.approx(9.0, rel=1e-6)
-    assert metadata["effective_bias"] == pytest.approx(-2.8, rel=1e-6)
-    assert float(uncertainty[0]) == pytest.approx(0.208, abs=1e-3)
-    assert float(uncertainty[1]) == pytest.approx(0.529, abs=1e-3)
-    assert float((uncertainty[1] ** 2) / (uncertainty[0] ** 2)) == pytest.approx(6.5, rel=0.05)
+    assert metadata["effective_xi"] == pytest.approx(8.0, rel=1e-6)
+    assert metadata["effective_bias"] == pytest.approx(-4.8, rel=1e-6)
+    assert float(uncertainty[0]) == pytest.approx(0.00816, abs=1e-4)
+    assert float(uncertainty[1]) == pytest.approx(0.5, abs=1e-6)
+    assert float(uncertainty[2]) == pytest.approx(0.96083, abs=1e-4)
     assert bool(((uncertainty > 0.0) & (uncertainty < 1.0)).all())
 
 
-@pytest.mark.parametrize("fusion_config", [None, {"enabled": False, "xi": 9.0, "bias": -2.8}])
+@pytest.mark.parametrize(
+    "fusion_config",
+    [None, {"enabled": False, "xi": 8.0, "bias": -4.8}],
+)
 def test_disabled_or_missing_calibration_fusion_preserves_checkpoint_values(
     monkeypatch,
     fusion_config,
@@ -644,8 +647,8 @@ def test_epoch_zero_remains_best_when_training_ece_gets_worse(monkeypatch, tmp_p
     config = _run_config(tmp_path)
     config["uncertainty"]["calibration_fusion"] = {
         "enabled": True,
-        "xi": 9.0,
-        "bias": -2.8,
+        "xi": 8.0,
+        "bias": -4.8,
     }
     warmup = _tiny_dual_head(monkeypatch)
     warmup.fusion.set_xi_bias(0.5, -6.0)
@@ -670,8 +673,8 @@ def test_epoch_zero_remains_best_when_training_ece_gets_worse(monkeypatch, tmp_p
     assert payload["metrics"]["ece"] == pytest.approx(0.04)
     assert payload["metrics"]["epoch_0_ece"] == pytest.approx(0.04)
     assert payload["metrics"]["best_candidate_source"] == "epoch_0"
-    assert float(best_model.fusion.xi) == pytest.approx(9.0, rel=1e-6)
-    assert float(best_model.fusion.bias) == pytest.approx(-2.8, rel=1e-6)
+    assert float(best_model.fusion.xi) == pytest.approx(8.0, rel=1e-6)
+    assert float(best_model.fusion.bias) == pytest.approx(-4.8, rel=1e-6)
 
 
 def test_training_epoch_replaces_epoch_zero_only_with_lower_eligible_ece(monkeypatch, tmp_path):
@@ -697,6 +700,44 @@ def test_training_epoch_replaces_epoch_zero_only_with_lower_eligible_ece(monkeyp
     assert payload["epoch"] == 0
     assert payload["metrics"]["ece"] == pytest.approx(0.04)
     assert payload["metrics"]["best_candidate_source"] == "epoch_1"
+
+
+def test_calibration_runs_fifty_epochs_and_validates_every_epoch(monkeypatch, tmp_path):
+    config = _run_config(tmp_path)
+    config["training"]["calibration_epochs"] = 50
+    config["training"]["validation_every"] = 1
+    warmup = _tiny_dual_head(monkeypatch)
+    checkpoint = tmp_path / "warmup.pt"
+    save_checkpoint(checkpoint, warmup, "warmup", 4, config, metrics={"mean_dice": 0.8})
+    current = _tiny_dual_head(monkeypatch)
+    metrics = {
+        "mean_dice": 0.8,
+        "ece": 0.04,
+        "risk_ece": 0.4,
+        "risk_brier": 0.3,
+    }
+    _TelemetryStub.instances.clear()
+    _patch_direct_calibration_runtime(monkeypatch, current, metrics)
+    calls = {"train": 0, "validate": 0}
+
+    def train(*args, **kwargs):
+        calls["train"] += 1
+        return {"duration_seconds": 0.0}
+
+    def validate(*args, **kwargs):
+        calls["validate"] += 1
+        return dict(metrics)
+
+    monkeypatch.setattr("ours.train.train_epoch", train)
+    monkeypatch.setattr("ours.train.validate", validate)
+
+    final_path = run(config, "calibration", str(checkpoint))
+    best_model = _tiny_dual_head(monkeypatch)
+    payload = load_checkpoint(final_path.parent / "best_calibrated.pt", best_model, strict=True)
+
+    assert calls == {"train": 50, "validate": 51}
+    assert payload["epoch"] == -1
+    assert payload["metrics"]["best_candidate_source"] == "epoch_0"
 
 
 def test_uncertainty_snapshot_contains_zernike_component_only(tmp_path):
