@@ -185,6 +185,29 @@ def calibration_checkpoint_key(metrics: dict[str, Any]) -> float:
     return float(metrics.get("basic_ece", metrics.get("ece", math.inf)))
 
 
+def apply_calibration_fusion_override(
+    model: DualHeadSwinUNETR,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply an optional calibration-only mapping after checkpoint loading."""
+    override = config["uncertainty"].get("calibration_fusion", {})
+    enabled = bool(override.get("enabled", False))
+    loaded_xi = float(model.fusion.xi.detach().cpu())
+    loaded_bias = float(model.fusion.bias.detach().cpu())
+    if enabled:
+        model.fusion.set_xi_bias(
+            xi=float(override.get("xi", 9.0)),
+            bias=float(override.get("bias", -2.8)),
+        )
+    return {
+        "enabled": enabled,
+        "loaded_xi": loaded_xi,
+        "loaded_bias": loaded_bias,
+        "effective_xi": float(model.fusion.xi.detach().cpu()),
+        "effective_bias": float(model.fusion.bias.detach().cpu()),
+    }
+
+
 def detached_geometric_uncertainty(
     model: DualHeadSwinUNETR,
     output: DualHeadOutput,
@@ -794,7 +817,13 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             telemetry.epoch_finished(
                 "warmup", epoch + 1, train_metrics, optimizer, model, train_metrics["duration_seconds"]
             )
-            if (epoch + 1) % int(config["training"].get("validation_every", 5)) == 0 or epoch + 1 == epochs:
+            warmup_validation_every = int(
+                config["training"].get(
+                    "warmup_validation_every",
+                    config["training"].get("validation_every", 5),
+                )
+            )
+            if (epoch + 1) % warmup_validation_every == 0 or epoch + 1 == epochs:
                 metrics = validate(model, val_loader, device, config, calibrated=False)
                 print(f"warmup epoch={epoch + 1} train={train_metrics} val={metrics}")
                 telemetry.validation_finished("warmup", epoch + 1, metrics)
@@ -895,6 +924,7 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             )
             source = stats_path
             source_payload = _load_required(source, model)
+        calibration_fusion = apply_calibration_fusion_override(model, config)
         reference_dice = float(source_payload.get("metrics", {}).get("mean_dice", math.nan))
         if not math.isfinite(reference_dice):
             reference_metrics = validate(model, val_loader, device, config, calibrated=False)
@@ -935,6 +965,7 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             calibration_input="independent_augmented_views_with_head_dropout",
             calibration_objective=calibration_objective,
             margin_gradient=margin_gradient_config,
+            calibration_fusion=calibration_fusion,
             segmentation_sha256_before=segmentation_sha256_before,
             encoder_sha256_before=encoder_sha256_before,
             frozen_calibration_sha256_before=frozen_calibration_sha256_before,
@@ -948,9 +979,92 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
         scheduler = _scheduler(optimizer, epochs, min(5, epochs))
         scaler = _make_scaler(bool(config["training"].get("amp", True)) and device.type == "cuda")
         best_calibration_key: float | None = None
+        best_candidate_source: str | None = None
         selected_this_run = False
         last_path = run_dir / "last_calibration.pt"
         target_lambda = float(config["uncertainty"].get("lambda_u", 1.0))
+
+        epoch_0_metrics = validate(
+            model,
+            val_loader,
+            device,
+            config,
+            calibrated=True,
+            epoch=0,
+        )
+        epoch_0_ece = calibration_checkpoint_key(epoch_0_metrics)
+        epoch_0_metrics.update(
+            {
+                "lambda_u": target_lambda,
+                "configured_risk_brier_weight": target_lambda,
+                "calibration_loss_weight": 0.0,
+                "freeze_segmentation": freeze_segmentation,
+                "calibration_trainable_scope": calibration_scope,
+                "calibration_input": "independent_augmented_views_with_head_dropout",
+                "uncertainty_objective": "geometric_uncertainty_weighted_atomic_margin",
+                "risk_brier_mode": "diagnostic_only",
+                "calibration_objective": calibration_objective,
+                "margin_gradient": margin_gradient_config,
+                "calibration_fusion": calibration_fusion,
+                "fusion_frozen": True,
+                "segmentation_sha256_before": segmentation_sha256_before,
+                "encoder_sha256_before": encoder_sha256_before,
+                "frozen_calibration_sha256_before": frozen_calibration_sha256_before,
+                "epoch_0_ece": epoch_0_ece,
+                "candidate_source": "epoch_0",
+                "candidate_epoch": 0,
+            }
+        )
+        telemetry.validation_finished("calibration", 0, epoch_0_metrics)
+        _append_metrics(
+            run_dir,
+            {
+                "run_id": telemetry.run_id,
+                "stage": "calibration",
+                "epoch": 0,
+                "train": None,
+                "val": epoch_0_metrics,
+            },
+        )
+        epoch_0_eligible = epoch_0_metrics["mean_dice"] >= reference_dice - float(
+            config["training"].get("dice_tolerance", 0.01)
+        )
+        if epoch_0_eligible and math.isfinite(epoch_0_ece):
+            best_calibration_key = epoch_0_ece
+            best_candidate_source = "epoch_0"
+            selected_this_run = True
+            epoch_0_metrics["best_ece"] = best_calibration_key
+            epoch_0_metrics["best_candidate_source"] = best_candidate_source
+            save_checkpoint(
+                calibrated_path,
+                model,
+                "calibration",
+                -1,
+                config,
+                optimizer,
+                scheduler,
+                epoch_0_metrics,
+            )
+            telemetry.event(
+                "best_checkpoint_saved",
+                stage="calibration",
+                epoch=0,
+                metric="ece",
+                value=best_calibration_key,
+                risk_ece=float(epoch_0_metrics.get("risk_ece", math.nan)),
+                risk_brier=float(epoch_0_metrics.get("risk_brier", math.nan)),
+                mean_dice=epoch_0_metrics["mean_dice"],
+                candidate_source=best_candidate_source,
+                path=str(calibrated_path),
+            )
+        telemetry.event(
+            "calibration_epoch_0_evaluated",
+            ece=epoch_0_ece,
+            mean_dice=float(epoch_0_metrics["mean_dice"]),
+            eligible=epoch_0_eligible,
+            selected=best_candidate_source == "epoch_0",
+            calibration_fusion=calibration_fusion,
+        )
         for epoch in range(epochs):
             lambda_u = target_lambda
             train_metrics = train_epoch(
@@ -999,10 +1113,14 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                 metrics["risk_brier_mode"] = "diagnostic_only"
                 metrics["calibration_objective"] = calibration_objective
                 metrics["margin_gradient"] = margin_gradient_config
+                metrics["calibration_fusion"] = calibration_fusion
                 metrics["fusion_frozen"] = True
                 metrics["segmentation_sha256_before"] = segmentation_sha256_before
                 metrics["encoder_sha256_before"] = encoder_sha256_before
                 metrics["frozen_calibration_sha256_before"] = frozen_calibration_sha256_before
+                metrics["epoch_0_ece"] = epoch_0_ece
+                metrics["candidate_source"] = "training_epoch"
+                metrics["candidate_epoch"] = epoch + 1
                 print(f"calibration epoch={epoch + 1} train={train_metrics} val={metrics}")
                 telemetry.validation_finished("calibration", epoch + 1, metrics)
                 if map_dir is not None:
@@ -1031,7 +1149,10 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                     best_calibration_key is None or candidate_key < best_calibration_key
                 ):
                     best_calibration_key = candidate_key
+                    best_candidate_source = f"epoch_{epoch + 1}"
                     selected_this_run = True
+                    metrics["best_ece"] = best_calibration_key
+                    metrics["best_candidate_source"] = best_candidate_source
                     save_checkpoint(calibrated_path, model, "calibration", epoch, config, optimizer, scheduler, metrics)
                     telemetry.event(
                         "best_checkpoint_saved",
@@ -1042,6 +1163,7 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                         risk_ece=float(metrics["risk_ece"]),
                         risk_brier=float(metrics["risk_brier"]),
                         mean_dice=metrics["mean_dice"],
+                        candidate_source=best_candidate_source,
                         path=str(calibrated_path),
                     )
         if not selected_this_run:
@@ -1095,6 +1217,10 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                 "calibration_input": "independent_augmented_views_with_head_dropout",
                 "calibration_objective": calibration_objective,
                 "margin_gradient": margin_gradient_config,
+                "calibration_fusion": calibration_fusion,
+                "epoch_0_ece": epoch_0_ece,
+                "best_ece": best_calibration_key,
+                "best_candidate_source": best_candidate_source,
                 "freeze_segmentation": freeze_segmentation,
                 "calibration_trainable_scope": calibration_scope,
                 "segmentation_sha256_before": segmentation_sha256_before,
@@ -1120,6 +1246,9 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             "stage_finished",
             stage="calibration",
             best_ece=best_calibration_key,
+            epoch_0_ece=epoch_0_ece,
+            best_candidate_source=best_candidate_source,
+            calibration_fusion=calibration_fusion,
             calibration_trainable_scope=calibration_scope,
             segmentation_sha256_before=segmentation_sha256_before,
             segmentation_sha256_after=segmentation_sha256_after,

@@ -98,9 +98,28 @@ def validate_config(config: dict[str, Any]) -> None:
     for key in ("warmup_epochs", "calibration_epochs", "validation_every"):
         if int(config["training"].get(key, 0)) <= 0:
             raise ValueError(f"training.{key} must be a positive integer")
+    if int(
+        config["training"].get(
+            "warmup_validation_every",
+            config["training"].get("validation_every", 0),
+        )
+    ) <= 0:
+        raise ValueError("training.warmup_validation_every must be a positive integer")
     calibration_weight = float(config["uncertainty"].get("lambda_u", 1.0))
     if not math.isfinite(calibration_weight) or calibration_weight < 0.0:
         raise ValueError("uncertainty.lambda_u must be finite and non-negative")
+    calibration_fusion = config["uncertainty"].get("calibration_fusion", {})
+    if not isinstance(calibration_fusion, dict):
+        raise ValueError("uncertainty.calibration_fusion must be a mapping")
+    fusion_override_enabled = calibration_fusion.get("enabled", False)
+    if not isinstance(fusion_override_enabled, bool):
+        raise ValueError("uncertainty.calibration_fusion.enabled must be a boolean")
+    fusion_xi = float(calibration_fusion.get("xi", 9.0))
+    if not math.isfinite(fusion_xi) or fusion_xi <= 0.0:
+        raise ValueError("uncertainty.calibration_fusion.xi must be finite and positive")
+    fusion_bias = float(calibration_fusion.get("bias", -2.8))
+    if not math.isfinite(fusion_bias):
+        raise ValueError("uncertainty.calibration_fusion.bias must be finite")
     margin_gradient = config["uncertainty"].get("margin_gradient", {})
     if not isinstance(margin_gradient, dict):
         raise ValueError("uncertainty.margin_gradient must be a mapping")

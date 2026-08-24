@@ -46,10 +46,15 @@ uncertainty:
   bias_init: -2.0
   # Retained for legacy metadata; Risk Brier is diagnostic during calibration.
   lambda_u: 1.0
+  # Applied only after loading the calibration source checkpoint.
+  calibration_fusion:
+    enabled: true
+    xi: 9.0
+    bias: -2.8
   # Calibration-only excessive-gap penalty weighted by geometric uncertainty.
   margin_gradient:
     enabled: true
-    weight: 0.01
+    weight: 0.02
     uncertainty_power: 2.0
     margin: 1.0
 
@@ -65,8 +70,10 @@ label_transfer:
 training:
   batch_size: 1
   warmup_epochs: 150
-  calibration_epochs: 50
-  validation_every: 5
+  calibration_epochs: 15
+  # Preserve the existing warmup schedule while validating calibration every epoch.
+  warmup_validation_every: 5
+  validation_every: 1
   learning_rate: 0.0001
   calibration_learning_rate: 0.00001
   weight_decay: 0.00001

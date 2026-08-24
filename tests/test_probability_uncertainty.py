@@ -13,6 +13,7 @@ from ours.probability import independent_logits_to_atomic, independent_logits_to
 from ours.train import (
     _make_scaler,
     _save_uncertainty_batch,
+    apply_calibration_fusion_override,
     calibration_checkpoint_key,
     detached_geometric_uncertainty,
     encoder_state_sha256,
@@ -129,6 +130,50 @@ def test_existing_warmup_state_dict_still_loads_strictly(monkeypatch, tmp_path):
     assert payload["stage"] == "warmup"
     assert current.state_dict().keys() == legacy.state_dict().keys()
     assert not current.zernike_stats.fitted
+
+
+def test_calibration_fusion_override_preserves_state_layout_and_sets_recommended_mapping(
+    monkeypatch,
+):
+    model = _tiny_dual_head(monkeypatch)
+    state_keys = tuple(model.state_dict())
+    config = _config()
+    config["uncertainty"]["calibration_fusion"] = {
+        "enabled": True,
+        "xi": 9.0,
+        "bias": -2.8,
+    }
+
+    metadata = apply_calibration_fusion_override(model, config)
+    disagreement = torch.tensor([0.1625, 0.3238]).reshape(2, 1, 1, 1, 1)
+    uncertainty = model.fusion(disagreement).flatten()
+
+    assert tuple(model.state_dict()) == state_keys
+    assert metadata["enabled"] is True
+    assert metadata["effective_xi"] == pytest.approx(9.0, rel=1e-6)
+    assert metadata["effective_bias"] == pytest.approx(-2.8, rel=1e-6)
+    assert float(uncertainty[0]) == pytest.approx(0.208, abs=1e-3)
+    assert float(uncertainty[1]) == pytest.approx(0.529, abs=1e-3)
+    assert float((uncertainty[1] ** 2) / (uncertainty[0] ** 2)) == pytest.approx(6.5, rel=0.05)
+    assert bool(((uncertainty > 0.0) & (uncertainty < 1.0)).all())
+
+
+@pytest.mark.parametrize("fusion_config", [None, {"enabled": False, "xi": 9.0, "bias": -2.8}])
+def test_disabled_or_missing_calibration_fusion_preserves_checkpoint_values(
+    monkeypatch,
+    fusion_config,
+):
+    model = _tiny_dual_head(monkeypatch)
+    model.fusion.set_xi_bias(2.5, -4.0)
+    config = _config()
+    if fusion_config is not None:
+        config["uncertainty"]["calibration_fusion"] = fusion_config
+
+    metadata = apply_calibration_fusion_override(model, config)
+
+    assert metadata["enabled"] is False
+    assert float(model.fusion.xi) == pytest.approx(2.5, rel=1e-6)
+    assert float(model.fusion.bias) == pytest.approx(-4.0, rel=1e-6)
 
 
 class _RiskOnlyToyModel(nn.Module):
@@ -530,7 +575,18 @@ def _patch_direct_calibration_runtime(monkeypatch, model, validation_metrics):
         "ours.train.train_epoch",
         lambda *args, **kwargs: {"duration_seconds": 0.0},
     )
-    monkeypatch.setattr("ours.train.validate", lambda *args, **kwargs: dict(validation_metrics))
+    if isinstance(validation_metrics, (list, tuple)):
+        validation_results = iter(validation_metrics)
+
+        def validate(*args, **kwargs):
+            return dict(next(validation_results))
+
+    else:
+
+        def validate(*args, **kwargs):
+            return dict(validation_metrics)
+
+    monkeypatch.setattr("ours.train.validate", validate)
     monkeypatch.setattr("ours.train.fit_z0", lambda *args, **kwargs: 0.1)
 
     def fit_statistics(current, *args, **kwargs):
@@ -582,6 +638,65 @@ def test_no_dice_eligible_checkpoint_keeps_only_diagnostic_last(monkeypatch, tmp
     assert (run_dir / "last_calibration.pt").is_file()
     assert not (run_dir / "best_calibrated.pt").exists()
     assert not (run_dir / "final.pt").exists()
+
+
+def test_epoch_zero_remains_best_when_training_ece_gets_worse(monkeypatch, tmp_path):
+    config = _run_config(tmp_path)
+    config["uncertainty"]["calibration_fusion"] = {
+        "enabled": True,
+        "xi": 9.0,
+        "bias": -2.8,
+    }
+    warmup = _tiny_dual_head(monkeypatch)
+    warmup.fusion.set_xi_bias(0.5, -6.0)
+    checkpoint = tmp_path / "warmup.pt"
+    save_checkpoint(checkpoint, warmup, "warmup", 4, config, metrics={"mean_dice": 0.8})
+    current = _tiny_dual_head(monkeypatch)
+    _TelemetryStub.instances.clear()
+    _patch_direct_calibration_runtime(
+        monkeypatch,
+        current,
+        [
+            {"mean_dice": 0.8, "ece": 0.04, "risk_ece": 0.4, "risk_brier": 0.3},
+            {"mean_dice": 0.8, "ece": 0.08, "risk_ece": 0.1, "risk_brier": 0.1},
+        ],
+    )
+
+    final_path = run(config, "calibration", str(checkpoint))
+    best_model = _tiny_dual_head(monkeypatch)
+    payload = load_checkpoint(final_path.parent / "best_calibrated.pt", best_model, strict=True)
+
+    assert payload["epoch"] == -1
+    assert payload["metrics"]["ece"] == pytest.approx(0.04)
+    assert payload["metrics"]["epoch_0_ece"] == pytest.approx(0.04)
+    assert payload["metrics"]["best_candidate_source"] == "epoch_0"
+    assert float(best_model.fusion.xi) == pytest.approx(9.0, rel=1e-6)
+    assert float(best_model.fusion.bias) == pytest.approx(-2.8, rel=1e-6)
+
+
+def test_training_epoch_replaces_epoch_zero_only_with_lower_eligible_ece(monkeypatch, tmp_path):
+    config = _run_config(tmp_path)
+    warmup = _tiny_dual_head(monkeypatch)
+    checkpoint = tmp_path / "warmup.pt"
+    save_checkpoint(checkpoint, warmup, "warmup", 4, config, metrics={"mean_dice": 0.8})
+    current = _tiny_dual_head(monkeypatch)
+    _TelemetryStub.instances.clear()
+    _patch_direct_calibration_runtime(
+        monkeypatch,
+        current,
+        [
+            {"mean_dice": 0.8, "ece": 0.08, "risk_ece": 0.01, "risk_brier": 0.01},
+            {"mean_dice": 0.8, "ece": 0.04, "risk_ece": 0.9, "risk_brier": 0.9},
+        ],
+    )
+
+    final_path = run(config, "calibration", str(checkpoint))
+    best_model = _tiny_dual_head(monkeypatch)
+    payload = load_checkpoint(final_path.parent / "best_calibrated.pt", best_model, strict=True)
+
+    assert payload["epoch"] == 0
+    assert payload["metrics"]["ece"] == pytest.approx(0.04)
+    assert payload["metrics"]["best_candidate_source"] == "epoch_1"
 
 
 def test_uncertainty_snapshot_contains_zernike_component_only(tmp_path):

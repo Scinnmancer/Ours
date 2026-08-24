@@ -26,6 +26,26 @@ class UncertaintyFusion(nn.Module):
     def xi(self) -> torch.Tensor:
         return F.softplus(self.raw_xi)
 
+    def set_xi_bias(self, xi: float, bias: float) -> None:
+        """Set the effective geometric mapping without changing state layout."""
+        xi = float(xi)
+        bias = float(bias)
+        if not math.isfinite(xi) or xi <= 0.0:
+            raise ValueError("xi must be finite and positive")
+        if not math.isfinite(bias):
+            raise ValueError("bias must be finite")
+        with torch.no_grad():
+            self.raw_xi.copy_(
+                torch.as_tensor(
+                    _inverse_softplus(xi),
+                    dtype=self.raw_xi.dtype,
+                    device=self.raw_xi.device,
+                )
+            )
+            self.bias.copy_(
+                torch.as_tensor(bias, dtype=self.bias.dtype, device=self.bias.device)
+            )
+
     def forward(
         self,
         zernike_disagreement: torch.Tensor,

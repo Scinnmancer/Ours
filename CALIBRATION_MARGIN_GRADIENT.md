@@ -12,6 +12,10 @@ u = sigmoid(bias + softplus(raw_xi) * zernike_disagreement)
 The calibration stage detaches `u` and uses it only as a voxel weight. It does
 not refit the uncertainty fusion. Only `head1` and `head2` are trainable; the
 encoder, Zernike statistics, fusion, and label-transfer module remain frozen.
+The default BraTS calibration run does apply a fixed mapping override after the
+warmup/statistics checkpoint has been loaded, then freezes that overridden
+mapping for the full calibration stage. The Zernike disagreement and fusion
+formula themselves are unchanged.
 Because the objective is explicitly `stopgrad(u^beta)`, calibration computes
 the unchanged Zernike disagreement and fusion formula under `torch.no_grad()`
 from detached atomic probabilities. This avoids retaining the multi-scale 3D
@@ -38,15 +42,31 @@ gradient; this prevents the penalty from reducing only the winning class.
 
 ```yaml
 uncertainty:
+  calibration_fusion:
+    enabled: true
+    xi: 9.0
+    bias: -2.8
   margin_gradient:
     enabled: true
-    weight: 0.01
+    weight: 0.02
     uncertainty_power: 2.0
     margin: 1.0
+
+training:
+  calibration_epochs: 15
+  warmup_validation_every: 5
+  validation_every: 1
 ```
 
 Legacy configurations without `margin_gradient` leave the margin objective
-disabled. The feature adds no model parameter and does not change `state_dict`.
+disabled. Legacy configurations without `calibration_fusion` preserve the
+fusion values loaded from their checkpoint. The override adds no model
+parameter and does not change `state_dict`, so old warmup checkpoints still
+load with `strict=True`.
+
+With the recommended mapping, `u(0.1625)` is approximately `0.208` and
+`u(0.3238)` is approximately `0.529`. Consequently, the squared uncertainty
+weight at the latter disagreement is about 6.5 times the former.
 
 The BraTS 2020 configuration uses `zernike.chunk_depth: 16` with the existing
 halo-preserving chunk implementation and `training.sw_batch_size: 1`. These
@@ -64,6 +84,11 @@ mean_dice >= reference_dice - training.dice_tolerance
 Eligible checkpoints are ranked only by ordinary four-class segmentation
 `ece`; equal ECE keeps the earlier checkpoint. Dice is an eligibility guard,
 not a ranking or tie-break metric. Risk ECE and Risk Brier are diagnostic only.
+Before the first calibration update, the loaded model with the fixed fusion
+override is evaluated by the same validation path as epoch 0. If it passes the
+Dice guard, it becomes the initial ECE candidate. A training epoch replaces it
+only when its ordinary ECE is strictly lower, so calibration cannot discard a
+better starting model merely because all 15 training epochs are worse.
 If no checkpoint is eligible, `last_calibration.pt` is retained for diagnosis,
 the stage fails, and neither `best_calibrated.pt` nor `final.pt` is produced by
 that run.
@@ -82,4 +107,7 @@ optimizer, scheduler, and GradScaler are created. Warmup epochs and warmup
 optimizer state are not resumed. If Zernike statistics are absent, the existing
 statistics fitting pass writes `stats_fitted.pt` before calibration starts. If
 checkpoint metadata has no finite `mean_dice`, the loaded warmup model is
-validated once to establish the Dice eligibility reference.
+validated once to establish the Dice eligibility reference. After any fitted
+statistics checkpoint is reloaded, `xi=9.0` and `bias=-2.8` are applied when
+`calibration_fusion.enabled=true`; this ordering prevents checkpoint values
+from replacing the configured calibration mapping.

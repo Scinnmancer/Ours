@@ -98,7 +98,12 @@ receive independently augmented intensity views and keep their independent
 `u = sigmoid(bias + softplus(raw_xi) * zernike_disagreement)` and is detached to
 weight an atomic-logit margin penalty. The total training loss is both heads'
 Dice losses plus the weighted penalty on class gaps exceeding the configured
-positive margin. Risk Brier remains a diagnostic and does not participate in
+margin. The default calibration run first overrides the fixed fusion mapping
+to `xi=9.0`, `bias=-2.8`, evaluates the unmodified heads as epoch 0, and then
+runs 15 epochs with validation every epoch. Dice controls checkpoint
+eligibility; ordinary segmentation ECE alone selects among eligible candidates,
+including epoch 0.
+Risk Brier remains a diagnostic and does not participate in
 backward. No model parameter or inference operation is added.
 
 The output mapping remains
