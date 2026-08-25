@@ -264,6 +264,9 @@ def train_epoch(
     )
     margin_uncertainty_power = float(margin_config.get("uncertainty_power", 2.0))
     margin_value = float(margin_config.get("margin", 1.0))
+    margin_error_selective = bool(margin_config.get("error_selective", False))
+    margin_uncertainty_quantile = float(margin_config.get("uncertainty_quantile", 0.0))
+    margin_percentile_weighting = bool(margin_config.get("percentile_weighting", False))
     if stage == "calibration":
         # Keep the frozen encoder deterministic while enabling each decoder's
         # independent Dropout3d during calibration.
@@ -344,6 +347,10 @@ def train_epoch(
                     output.base_atomic_probability,
                     output.uncertainty,
                     mask=calibration_mask,
+                    target=atomic_target,
+                    error_selective=margin_error_selective,
+                    uncertainty_quantile=margin_uncertainty_quantile,
+                    percentile_weighting=margin_percentile_weighting,
                     uncertainty_power=margin_uncertainty_power,
                     margin=margin_value,
                 )
@@ -465,6 +472,9 @@ def train_epoch(
     metrics["margin_gradient_weight"] = margin_gradient_weight if margin_gradient_enabled else 0.0
     metrics["margin_uncertainty_power"] = margin_uncertainty_power
     metrics["margin"] = margin_value
+    metrics["margin_error_selective"] = margin_error_selective
+    metrics["margin_uncertainty_quantile"] = margin_uncertainty_quantile
+    metrics["margin_percentile_weighting"] = margin_percentile_weighting
     if compute_uncertainty:
         metrics["fusion_xi"] = float(model.fusion.xi.detach())
         metrics["fusion_bias"] = float(model.fusion.bias.detach())

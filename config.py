@@ -137,6 +137,21 @@ def validate_config(config: dict[str, Any]) -> None:
     margin = float(margin_gradient.get("margin", 1.0))
     if not math.isfinite(margin) or margin <= 0.0:
         raise ValueError("uncertainty.margin_gradient.margin must be finite and positive")
+    error_selective = margin_gradient.get("error_selective", False)
+    if not isinstance(error_selective, bool):
+        raise ValueError("uncertainty.margin_gradient.error_selective must be a boolean")
+    uncertainty_quantile = float(margin_gradient.get("uncertainty_quantile", 0.0))
+    if (
+        not math.isfinite(uncertainty_quantile)
+        or uncertainty_quantile < 0.0
+        or uncertainty_quantile > 1.0
+    ):
+        raise ValueError(
+            "uncertainty.margin_gradient.uncertainty_quantile must be finite and in [0, 1]"
+        )
+    percentile_weighting = margin_gradient.get("percentile_weighting", False)
+    if not isinstance(percentile_weighting, bool):
+        raise ValueError("uncertainty.margin_gradient.percentile_weighting must be a boolean")
     freeze_calibration = config["training"].get("freeze_segmentation_during_calibration", True)
     if not isinstance(freeze_calibration, bool):
         raise ValueError("training.freeze_segmentation_during_calibration must be a boolean")

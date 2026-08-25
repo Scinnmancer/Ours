@@ -55,8 +55,11 @@ uncertainty:
   margin_gradient:
     enabled: true
     weight: 0.02
-    uncertainty_power: 2.0
+    uncertainty_power: 1.0
     margin: 1.0
+    error_selective: true
+    uncertainty_quantile: 0.7
+    percentile_weighting: true
 
 label_transfer:
   radius: 2
@@ -70,7 +73,7 @@ label_transfer:
 training:
   batch_size: 1
   warmup_epochs: 150
-  calibration_epochs: 50
+  calibration_epochs: 10
   # Preserve the existing warmup schedule while validating calibration every epoch.
   warmup_validation_every: 5
   validation_every: 1
