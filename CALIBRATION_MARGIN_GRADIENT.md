@@ -22,32 +22,21 @@ from detached atomic probabilities. This avoids retaining the multi-scale 3D
 convolution graph; it does not change `u`, the loss, or the head gradients.
 
 For the base four-class atomic probability `p`, define atomic logits
-`a = log(p + eps)` and detached top class `k* = argmax(a)`. Within the union of
-predicted and true tumor voxels, convert detached `u` to its per-case percentile
-rank `r`. The active set contains only currently incorrect voxels in the highest
-uncertainty quantile. Calibration minimizes
+`a = log(p + eps)` and detached top class `k* = argmax(a)`. On the union `M` of
+predicted and true tumor voxels, calibration minimizes
 
 ```text
 L = Dice(head1) + Dice(head2) + weight * L_margin
 
-M = {i: prediction_i != target_i and r_i >= uncertainty_quantile}
-L_margin = (1 / |ROI|) * sum_(i in M) r_i^beta
-           * sum(valid k != k*) relu(a[k*] - a[k] - margin)
+L_margin = mean_M u^beta * sum(valid k != k*) relu(a[k*] - a[k] - margin)
 ```
 
-The raw geometric uncertainty remains unchanged for inference, telemetry, and
-maps; percentile rank is used only as a detached gradient weight. This keeps
-the emphasis on relatively high-risk voxels when the absolute `u` scale drifts
-as the two heads change. Correct predictions receive no calibration gradient.
-Normalization remains over the original ROI, so selection does not silently
-amplify the configured margin weight.
-For an active error, only excessive class gaps are reduced. Once a gap is
-within the positive margin, that pair contributes no calibration gradient.
-Risk Brier, Risk ECE, and geometric disagreement remain diagnostics and do not
-participate in backward. Exact structural-zero classes created by the
-nested-region bridge are excluded from the competitor set because they have no
-usable local gradient; this prevents the penalty from reducing only the
-winning class.
+Only excessive class gaps are reduced. Once a gap is within the positive
+margin, that pair contributes no calibration gradient. Risk Brier, Risk ECE,
+and geometric disagreement remain diagnostics and do not participate in
+backward. Exact structural-zero classes created by the nested-region bridge
+are excluded from the competitor set because they have no usable local
+gradient; this prevents the penalty from reducing only the winning class.
 
 ## Configuration
 
@@ -60,14 +49,11 @@ uncertainty:
   margin_gradient:
     enabled: true
     weight: 0.02
-    uncertainty_power: 1.0
+    uncertainty_power: 2.0
     margin: 1.0
-    error_selective: true
-    uncertainty_quantile: 0.7
-    percentile_weighting: true
 
 training:
-  calibration_epochs: 10
+  calibration_epochs: 50
   warmup_validation_every: 5
   validation_every: 1
 ```
@@ -105,7 +91,7 @@ Before the first calibration update, the loaded model with the fixed fusion
 override is evaluated by the same validation path as epoch 0. If it passes the
 Dice guard, it becomes the initial ECE candidate. A training epoch replaces it
 only when its ordinary ECE is strictly lower, so calibration cannot discard a
-better starting model merely because all 10 training epochs are worse.
+better starting model merely because all 50 training epochs are worse.
 If no checkpoint is eligible, `last_calibration.pt` is retained for diagnosis,
 the stage fails, and neither `best_calibrated.pt` nor `final.pt` is produced by
 that run.

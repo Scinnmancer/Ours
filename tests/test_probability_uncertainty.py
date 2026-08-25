@@ -45,11 +45,8 @@ def _config() -> dict:
             "margin_gradient": {
                 "enabled": True,
                 "weight": 0.01,
-                "uncertainty_power": 1.0,
+                "uncertainty_power": 2.0,
                 "margin": 1.0,
-                "error_selective": True,
-                "uncertainty_quantile": 0.7,
-                "percentile_weighting": True,
             },
         },
         "label_transfer": {"radius": 1, "sigma": 1.0, "alpha_max": 0.2},
@@ -345,79 +342,11 @@ def test_margin_loss_detaches_geometric_uncertainty():
     assert uncertainty.grad is None
 
 
-def test_error_selective_margin_penalizes_only_wrong_predictions():
-    values = torch.tensor([0.90, 0.05, 0.03, 0.02]).reshape(1, 4, 1, 1, 1)
-    uncertainty = torch.full((1, 1, 1, 1, 1), 0.9)
-    correct = uncertainty_weighted_margin_loss(
-        values.clone().requires_grad_(True),
-        uncertainty,
-        target=torch.zeros(1, 1, 1, 1, dtype=torch.long),
-        error_selective=True,
-        uncertainty_quantile=0.7,
-        percentile_weighting=True,
-        uncertainty_power=1.0,
-        margin=1.0,
-    )
-    wrong_atomic = values.clone().requires_grad_(True)
-    wrong = uncertainty_weighted_margin_loss(
-        wrong_atomic,
-        uncertainty,
-        target=torch.ones(1, 1, 1, 1, dtype=torch.long),
-        error_selective=True,
-        uncertainty_quantile=0.7,
-        percentile_weighting=True,
-        uncertainty_power=1.0,
-        margin=1.0,
-    )
-
-    torch.testing.assert_close(correct, torch.zeros_like(correct))
-    assert float(wrong) > 0.0
-    assert torch.autograd.grad(wrong, wrong_atomic)[0].norm() > 0.0
-
-
-def test_percentile_margin_selects_high_uncertainty_error_and_is_scale_stable():
-    atomic = torch.tensor(
-        [
-            [0.90, 0.80],
-            [0.05, 0.10],
-            [0.03, 0.06],
-            [0.02, 0.04],
-        ]
-    ).reshape(1, 4, 1, 1, 2)
-    target = torch.ones(1, 1, 1, 2, dtype=torch.long)
-
-    def loss_for(uncertainty_values):
-        return uncertainty_weighted_margin_loss(
-            atomic.clone().requires_grad_(True),
-            torch.tensor(uncertainty_values).reshape(1, 1, 1, 1, 2),
-            target=target,
-            error_selective=True,
-            uncertainty_quantile=0.7,
-            percentile_weighting=True,
-            uncertainty_power=1.0,
-            margin=1.0,
-        )
-
-    high_scale = loss_for([0.9, 0.1])
-    low_scale = loss_for([0.3, 0.01])
-
-    torch.testing.assert_close(high_scale, low_scale)
-    assert float(high_scale) > 0.0
-
-
 def test_margin_gradient_config_rejects_negative_weight():
     config = _config()
     config["uncertainty"]["margin_gradient"]["weight"] = -0.01
 
     with pytest.raises(ValueError, match="margin_gradient.weight"):
-        validate_config(config)
-
-
-def test_margin_gradient_config_rejects_invalid_uncertainty_quantile():
-    config = _config()
-    config["uncertainty"]["margin_gradient"]["uncertainty_quantile"] = 1.1
-
-    with pytest.raises(ValueError, match="uncertainty_quantile"):
         validate_config(config)
 
 

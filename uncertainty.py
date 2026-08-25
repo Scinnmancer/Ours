@@ -71,23 +71,17 @@ def uncertainty_weighted_margin_loss(
     atomic_probability: torch.Tensor,
     uncertainty: torch.Tensor,
     mask: torch.Tensor | None = None,
-    target: torch.Tensor | None = None,
-    error_selective: bool = False,
-    uncertainty_quantile: float = 0.0,
-    percentile_weighting: bool = False,
     uncertainty_power: float = 2.0,
     margin: float = 1.0,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Penalize excessive atomic-logit gaps at selected geometric-risk voxels.
+    """Penalize excessive atomic-logit gaps using detached geometric risk.
 
     ``log(p + eps)`` is used as the four-class atomic logit bridge.  The
     current top class and the geometric-moment uncertainty are detached, so
     this objective can only update the prediction heads.  Positive ``margin``
     leaves a non-zero class gap instead of continuously pushing predictions
-    toward a uniform distribution.  Optional error selection leaves correct
-    predictions untouched, while percentile weighting keeps the relative
-    high-risk emphasis stable when the absolute uncertainty scale drifts.
+    toward a uniform distribution.
     """
     if atomic_probability.ndim < 3 or atomic_probability.shape[1] != 4:
         raise ValueError(
@@ -106,16 +100,6 @@ def uncertainty_weighted_margin_loss(
         )
     if not math.isfinite(float(uncertainty_power)) or float(uncertainty_power) < 0.0:
         raise ValueError("uncertainty_power must be finite and non-negative")
-    if (
-        not math.isfinite(float(uncertainty_quantile))
-        or float(uncertainty_quantile) < 0.0
-        or float(uncertainty_quantile) > 1.0
-    ):
-        raise ValueError("uncertainty_quantile must be finite and in [0, 1]")
-    if not isinstance(error_selective, bool):
-        raise ValueError("error_selective must be a boolean")
-    if not isinstance(percentile_weighting, bool):
-        raise ValueError("percentile_weighting must be a boolean")
     if not math.isfinite(float(margin)) or float(margin) <= 0.0:
         raise ValueError("margin must be finite and positive")
     if not math.isfinite(float(eps)) or float(eps) <= 0.0:
@@ -132,7 +116,7 @@ def uncertainty_weighted_margin_loss(
     # them would only push down the winner and could collapse the segmentation.
     competitor &= atomic_probability.detach() > float(eps)
     weighted_gap = excessive_gap * competitor.to(dtype=excessive_gap.dtype)
-    detached_uncertainty = uncertainty.detach().float().clamp(0.0, 1.0)
+    weight = uncertainty.detach().float().clamp(0.0, 1.0).pow(float(uncertainty_power))
 
     if mask is not None:
         detached_mask = mask.detach()
@@ -142,46 +126,11 @@ def uncertainty_weighted_margin_loss(
             raise ValueError(
                 f"mask must have shape {expected_scalar_shape} or omit the channel dimension"
             )
-        voxel_mask = detached_mask.to(dtype=torch.bool)
+        voxel_mask = detached_mask.to(dtype=weighted_gap.dtype)
     else:
-        voxel_mask = torch.ones_like(detached_uncertainty, dtype=torch.bool)
+        voxel_mask = torch.ones_like(weight)
 
-    ranking_mask = voxel_mask.clone()
-
-    percentile_rank = torch.zeros_like(detached_uncertainty)
-    for batch_index in range(detached_uncertainty.shape[0]):
-        sample_mask = ranking_mask[batch_index]
-        sample_values = detached_uncertainty[batch_index][sample_mask]
-        if sample_values.numel() == 0:
-            continue
-        sorted_values = sample_values.sort().values
-        sample_rank = torch.searchsorted(sorted_values, sample_values, right=True).to(
-            detached_uncertainty.dtype
-        ) / float(sample_values.numel())
-        percentile_rank[batch_index][sample_mask] = sample_rank
-
-    if error_selective:
-        if target is None:
-            raise ValueError("target is required when error_selective=True")
-        detached_target = target.detach()
-        if detached_target.ndim == atomic_probability.ndim - 1:
-            detached_target = detached_target.unsqueeze(1)
-        if tuple(detached_target.shape) != expected_scalar_shape:
-            raise ValueError(
-                f"target must have shape {expected_scalar_shape} or omit the channel dimension"
-            )
-        voxel_mask &= top_index != detached_target.long()
-
-    if float(uncertainty_quantile) > 0.0:
-        voxel_mask &= percentile_rank >= float(uncertainty_quantile)
-    weight_source = percentile_rank if percentile_weighting else detached_uncertainty
-    weight = weight_source.pow(float(uncertainty_power))
-
-    # Preserve the original ROI normalization so enabling selection changes
-    # where gradients act without silently amplifying each selected voxel.
-    denominator = ranking_mask.sum()
+    denominator = voxel_mask.sum()
     if not bool(denominator > 0):
         return atomic_probability.sum() * 0.0
-    return (
-        weighted_gap * weight * voxel_mask.to(dtype=weighted_gap.dtype)
-    ).sum() / denominator
+    return (weighted_gap * weight * voxel_mask).sum() / denominator
