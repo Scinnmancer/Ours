@@ -104,7 +104,7 @@ class DualHeadSwinUNETR(nn.Module):
         self.encoder4 = template1.encoder4
         self.encoder10 = template1.encoder10
         self.normalize = getattr(template1, "normalize", True)
-        head_dropout_rates = config["model"].get("head_dropout_rates", [0.1, 0.1])
+        head_dropout_rates = config["model"].get("head_dropout_rates", [0.2, 0.3])
         if not isinstance(head_dropout_rates, (list, tuple)) or len(head_dropout_rates) != 2:
             raise ValueError("model.head_dropout_rates must contain exactly two values")
         self.head1 = DecoderBranch(template1, float(head_dropout_rates[0]))

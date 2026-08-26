@@ -33,7 +33,7 @@ def _config() -> dict:
             "in_channels": 1,
             "region_channels": 3,
             "feature_size": 12,
-            "head_dropout_rates": [0.1, 0.1],
+            "head_dropout_rates": [0.2, 0.3],
             "output_mode": "independent_sigmoid",
         },
         "zernike": {"windows": [3], "orders": [[0, 0]], "chunk_depth": 0},
@@ -45,7 +45,7 @@ def _config() -> dict:
             "margin_gradient": {
                 "enabled": True,
                 "weight": 0.01,
-                "uncertainty_power": 2.0,
+                "uncertainty_power": 1.0,
                 "margin": 1.0,
             },
         },
@@ -120,9 +120,12 @@ def test_model_uncertainty_path_uses_zernike_and_does_not_compute_js(monkeypatch
 
 
 def test_existing_warmup_state_dict_still_loads_strictly(monkeypatch, tmp_path):
-    legacy = _tiny_dual_head(monkeypatch)
+    monkeypatch.setattr("ours.model._make_swin_unetr", lambda config: _TinyTemplate())
+    legacy_config = _config()
+    legacy_config["model"]["head_dropout_rates"] = [0.1, 0.1]
+    legacy = DualHeadSwinUNETR(legacy_config)
     path = tmp_path / "legacy_warmup.pt"
-    save_checkpoint(path, legacy, "warmup", 4, _config(), metrics={"mean_dice": 0.7})
+    save_checkpoint(path, legacy, "warmup", 4, legacy_config, metrics={"mean_dice": 0.7})
 
     current = _tiny_dual_head(monkeypatch)
     payload = load_checkpoint(path, current, strict=True)
@@ -130,6 +133,24 @@ def test_existing_warmup_state_dict_still_loads_strictly(monkeypatch, tmp_path):
     assert payload["stage"] == "warmup"
     assert current.state_dict().keys() == legacy.state_dict().keys()
     assert not current.zernike_stats.fitted
+
+
+def test_asymmetric_head_dropout_is_active_only_during_training(monkeypatch):
+    model = _tiny_dual_head(monkeypatch)
+    assert isinstance(model.head1.dropout, nn.Dropout3d)
+    assert isinstance(model.head2.dropout, nn.Dropout3d)
+    assert model.head1.dropout.p == pytest.approx(0.2)
+    assert model.head2.dropout.p == pytest.approx(0.3)
+
+    sample = torch.ones(1, 64, 1, 1, 1)
+    model.train()
+    torch.manual_seed(0)
+    dropped = model.head2.dropout(sample)
+    assert bool((dropped == 0.0).any())
+
+    model.eval()
+    torch.testing.assert_close(model.head1.dropout(sample), sample)
+    torch.testing.assert_close(model.head2.dropout(sample), sample)
 
 
 def test_calibration_fusion_override_preserves_state_layout_and_sets_recommended_mapping(
@@ -282,31 +303,48 @@ def test_risk_brier_loss_requires_aligned_shapes():
         risk_brier_loss(torch.zeros(2), torch.zeros(1, 2))
 
 
-def test_margin_gradient_is_stronger_for_high_geometric_uncertainty_and_keeps_top_class():
+def test_margin_gradient_uses_roi_normalized_linear_uncertainty_and_keeps_top_class():
     values = torch.tensor([0.90, 0.05, 0.03, 0.02]).reshape(1, 4, 1, 1, 1)
+    atomic = values.expand(1, 4, 1, 1, 2).clone().requires_grad_(True)
+    uncertainty = torch.tensor([0.1, 0.9]).reshape(1, 1, 1, 1, 2)
 
-    high_atomic = values.clone().requires_grad_(True)
-    high_loss = uncertainty_weighted_margin_loss(
-        high_atomic,
-        torch.full((1, 1, 1, 1, 1), 0.9),
-        uncertainty_power=2.0,
+    loss = uncertainty_weighted_margin_loss(
+        atomic,
+        uncertainty,
+        uncertainty_power=1.0,
         margin=1.0,
     )
-    high_gradient = torch.autograd.grad(high_loss, high_atomic)[0]
+    gradient = torch.autograd.grad(loss, atomic)[0]
+    updated = atomic.detach() - 1e-4 * gradient
 
-    low_atomic = values.clone().requires_grad_(True)
-    low_loss = uncertainty_weighted_margin_loss(
-        low_atomic,
-        torch.full((1, 1, 1, 1, 1), 0.1),
-        uncertainty_power=2.0,
+    assert float(gradient[..., 1].norm()) > float(gradient[..., 0].norm())
+    assert bool((updated.argmax(dim=1) == values.argmax(dim=1)).all())
+    assert not bool(loss.isnan())
+
+    single_voxel_loss = uncertainty_weighted_margin_loss(
+        values,
+        torch.full((1, 1, 1, 1, 1), 0.5),
+        uncertainty_power=1.0,
         margin=1.0,
     )
-    low_gradient = torch.autograd.grad(low_loss, low_atomic)[0]
-    updated = high_atomic.detach() - 1e-4 * high_gradient
+    torch.testing.assert_close(loss, single_voxel_loss, rtol=1e-4, atol=1e-5)
 
-    assert float(high_gradient.norm()) > float(low_gradient.norm())
-    assert int(updated.argmax(dim=1)) == int(values.argmax(dim=1))
-    assert not bool(high_loss.isnan())
+
+def test_margin_weight_normalization_ignores_uncertainty_outside_mask():
+    values = torch.tensor([0.90, 0.05, 0.03, 0.02]).reshape(1, 4, 1, 1, 1)
+    atomic = values.expand(1, 4, 1, 1, 3).clone()
+    mask = torch.tensor([True, True, False]).reshape(1, 1, 1, 1, 3)
+    uncertainty = torch.tensor([0.1, 0.9, 0.0]).reshape(1, 1, 1, 1, 3)
+    changed_outside = torch.tensor([0.1, 0.9, 1.0]).reshape(1, 1, 1, 1, 3)
+
+    first = uncertainty_weighted_margin_loss(
+        atomic, uncertainty, mask=mask, uncertainty_power=1.0, margin=1.0
+    )
+    second = uncertainty_weighted_margin_loss(
+        atomic, changed_outside, mask=mask, uncertainty_power=1.0, margin=1.0
+    )
+
+    torch.testing.assert_close(first, second)
 
 
 def test_margin_loss_is_zero_below_margin_and_for_empty_mask():
@@ -315,20 +353,31 @@ def test_margin_loss_is_zero_below_margin_and_for_empty_mask():
     below_margin = uncertainty_weighted_margin_loss(
         atomic,
         uncertainty,
-        uncertainty_power=2.0,
+        uncertainty_power=1.0,
         margin=1.0,
     )
     empty = uncertainty_weighted_margin_loss(
         atomic,
         uncertainty,
         mask=torch.zeros(1, 1, 1, 1, dtype=torch.bool),
-        uncertainty_power=2.0,
+        uncertainty_power=1.0,
         margin=1.0,
     )
 
     torch.testing.assert_close(below_margin, torch.zeros_like(below_margin))
     torch.testing.assert_close(empty, torch.zeros_like(empty))
     assert bool(torch.isfinite(empty))
+
+    active = torch.tensor([0.90, 0.05, 0.03, 0.02]).reshape(1, 4, 1, 1, 1)
+    zero_uncertainty = torch.zeros(1, 1, 1, 1, 1)
+    zero_u_loss = uncertainty_weighted_margin_loss(
+        active,
+        zero_uncertainty,
+        uncertainty_power=1.0,
+        margin=1.0,
+    )
+    assert bool(torch.isfinite(zero_u_loss))
+    assert float(zero_u_loss) > 0.0
 
 
 def test_margin_loss_detaches_geometric_uncertainty():

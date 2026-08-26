@@ -28,7 +28,7 @@ model:
   dropout_rate: 0.0
   attention_dropout_rate: 0.0
   dropout_path_rate: 0.0
-  head_dropout_rates: [0.1, 0.1]
+  head_dropout_rates: [0.2, 0.3]
   use_checkpoint: true
   encoder_warm_start: true
 
@@ -55,7 +55,7 @@ uncertainty:
   margin_gradient:
     enabled: true
     weight: 0.02
-    uncertainty_power: 2.0
+    uncertainty_power: 1.0
     margin: 1.0
 
 label_transfer:

@@ -16,7 +16,7 @@ The default BraTS calibration run does apply a fixed mapping override after the
 warmup/statistics checkpoint has been loaded, then freezes that overridden
 mapping for the full calibration stage. The Zernike disagreement and fusion
 formula themselves are unchanged.
-Because the objective is explicitly `stopgrad(u^beta)`, calibration computes
+Because the objective uses detached geometric uncertainty weights, calibration computes
 the unchanged Zernike disagreement and fusion formula under `torch.no_grad()`
 from detached atomic probabilities. This avoids retaining the multi-scale 3D
 convolution graph; it does not change `u`, the loss, or the head gradients.
@@ -28,7 +28,9 @@ predicted and true tumor voxels, calibration minimizes
 ```text
 L = Dice(head1) + Dice(head2) + weight * L_margin
 
-L_margin = mean_M u^beta * sum(valid k != k*) relu(a[k*] - a[k] - margin)
+raw_weight[i] = eps + stopgrad(u[i])^beta
+weight[i] = raw_weight[i] / (mean_M(raw_weight) + eps)
+L_margin = mean_M weight[i] * sum(valid k != k*) relu(a[k*] - a[k] - margin)
 ```
 
 Only excessive class gaps are reduced. Once a gap is within the positive
@@ -49,7 +51,7 @@ uncertainty:
   margin_gradient:
     enabled: true
     weight: 0.02
-    uncertainty_power: 2.0
+    uncertainty_power: 1.0
     margin: 1.0
 
 training:
@@ -57,6 +59,12 @@ training:
   warmup_validation_every: 5
   validation_every: 1
 ```
+
+The default linear setting therefore uses ROI-normalized `eps + u`. Its mean
+weight is approximately one, so the configured margin coefficient is not
+silently reduced when the absolute uncertainty level is low. The two decoder
+heads use asymmetric training-time `Dropout3d` rates `[0.2, 0.3]`; dropout is
+disabled automatically during validation and inference.
 
 Legacy configurations without `margin_gradient` leave the margin objective
 disabled. Legacy configurations without `calibration_fusion` preserve the

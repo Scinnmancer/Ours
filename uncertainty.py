@@ -71,7 +71,7 @@ def uncertainty_weighted_margin_loss(
     atomic_probability: torch.Tensor,
     uncertainty: torch.Tensor,
     mask: torch.Tensor | None = None,
-    uncertainty_power: float = 2.0,
+    uncertainty_power: float = 1.0,
     margin: float = 1.0,
     eps: float = 1e-6,
 ) -> torch.Tensor:
@@ -116,7 +116,6 @@ def uncertainty_weighted_margin_loss(
     # them would only push down the winner and could collapse the segmentation.
     competitor &= atomic_probability.detach() > float(eps)
     weighted_gap = excessive_gap * competitor.to(dtype=excessive_gap.dtype)
-    weight = uncertainty.detach().float().clamp(0.0, 1.0).pow(float(uncertainty_power))
 
     if mask is not None:
         detached_mask = mask.detach()
@@ -128,9 +127,15 @@ def uncertainty_weighted_margin_loss(
             )
         voxel_mask = detached_mask.to(dtype=weighted_gap.dtype)
     else:
-        voxel_mask = torch.ones_like(weight)
+        voxel_mask = torch.ones_like(uncertainty.detach(), dtype=weighted_gap.dtype)
 
     denominator = voxel_mask.sum()
     if not bool(denominator > 0):
         return atomic_probability.sum() * 0.0
+
+    raw_weight = float(eps) + uncertainty.detach().float().clamp(0.0, 1.0).pow(
+        float(uncertainty_power)
+    )
+    masked_mean_weight = (raw_weight * voxel_mask).sum() / denominator
+    weight = raw_weight / (masked_mean_weight + float(eps))
     return (weighted_gap * weight * voxel_mask).sum() / denominator

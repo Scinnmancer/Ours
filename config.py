@@ -78,7 +78,7 @@ def validate_config(config: dict[str, Any]) -> None:
     roi = config["data"].get("roi_size", [])
     if len(roi) != 3 or any(int(size) <= 0 for size in roi):
         raise ValueError("data.roi_size must contain three positive integers")
-    head_dropout_rates = config["model"].get("head_dropout_rates", [0.1, 0.1])
+    head_dropout_rates = config["model"].get("head_dropout_rates", [0.2, 0.3])
     if (
         not isinstance(head_dropout_rates, (list, tuple))
         or len(head_dropout_rates) != 2
@@ -129,7 +129,7 @@ def validate_config(config: dict[str, Any]) -> None:
     margin_weight = float(margin_gradient.get("weight", 0.01))
     if not math.isfinite(margin_weight) or margin_weight < 0.0:
         raise ValueError("uncertainty.margin_gradient.weight must be finite and non-negative")
-    uncertainty_power = float(margin_gradient.get("uncertainty_power", 2.0))
+    uncertainty_power = float(margin_gradient.get("uncertainty_power", 1.0))
     if not math.isfinite(uncertainty_power) or uncertainty_power < 0.0:
         raise ValueError(
             "uncertainty.margin_gradient.uncertainty_power must be finite and non-negative"

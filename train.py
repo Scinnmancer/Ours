@@ -262,7 +262,7 @@ def train_epoch(
         and bool(margin_config.get("enabled", False))
         and margin_gradient_weight > 0.0
     )
-    margin_uncertainty_power = float(margin_config.get("uncertainty_power", 2.0))
+    margin_uncertainty_power = float(margin_config.get("uncertainty_power", 1.0))
     margin_value = float(margin_config.get("margin", 1.0))
     if stage == "calibration":
         # Keep the frozen encoder deterministic while enabling each decoder's

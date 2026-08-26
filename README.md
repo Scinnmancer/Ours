@@ -24,7 +24,7 @@ region probabilities.
 
 Shared Swin, attention, and stochastic-depth dropout rates are zero. Each
 decoder has its own output `Dropout3d` module, configured by
-`model.head_dropout_rates` (default `[0.1, 0.1]`), so the two heads sample
+`model.head_dropout_rates` (default `[0.2, 0.3]`), so the two heads sample
 independent masks during training without injecting dropout into the shared
 encoder.
 
