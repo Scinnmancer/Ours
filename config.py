@@ -88,6 +88,14 @@ def validate_config(config: dict[str, Any]) -> None:
     alpha = float(config["label_transfer"].get("alpha_max", 0.35))
     if not 0.0 <= alpha < 1.0:
         raise ValueError("label_transfer.alpha_max must be in [0, 1)")
+    consensus_margin = float(config["label_transfer"].get("consensus_margin", 0.25))
+    class_change_margin = float(config["label_transfer"].get("class_change_margin", 0.30))
+    if not 0.0 <= consensus_margin < 1.0:
+        raise ValueError("label_transfer.consensus_margin must be in [0, 1)")
+    if not consensus_margin <= class_change_margin <= 1.0:
+        raise ValueError(
+            "label_transfer.class_change_margin must be in [consensus_margin, 1]"
+        )
     refine_scale = float(config["evaluation"].get("refine_strength_scale", 1.0))
     if not math.isfinite(refine_scale) or refine_scale <= 0.0:
         raise ValueError("evaluation.refine_strength_scale must be finite and greater than 0")

@@ -22,17 +22,25 @@ class UncertaintyGatedLabelTransfer(nn.Module):
         alpha_max: float = 0.35,
         beta: float = 2.0,
         iterations: int = 3,
+        consensus_margin: float = 0.25,
+        class_change_margin: float = 0.30,
         z0: float = 0.5,
         eps: float = 1e-7,
     ):
         super().__init__()
         if not 0.0 <= alpha_max < 1.0:
             raise ValueError("alpha_max must be in [0, 1)")
+        if not 0.0 <= consensus_margin < 1.0:
+            raise ValueError("consensus_margin must be in [0, 1)")
+        if not consensus_margin <= class_change_margin <= 1.0:
+            raise ValueError("class_change_margin must be in [consensus_margin, 1]")
         self.radius = int(radius)
         self.gamma = float(gamma)
         self.alpha_max = float(alpha_max)
         self.beta = float(beta)
         self.iterations = int(iterations)
+        self.consensus_margin = float(consensus_margin)
+        self.class_change_margin = float(class_change_margin)
         self.eps = float(eps)
         self.register_buffer("kernel", gaussian_kernel3d(self.radius, sigma)[None, None])
         self.register_buffer("z0", torch.tensor(float(z0)))
@@ -55,20 +63,37 @@ class UncertaintyGatedLabelTransfer(nn.Module):
         kernel = self.kernel.to(dtype=p.dtype)
         z = F.conv3d(reliability, kernel, padding=self.radius)
         support = (z / self.z0.to(dtype=z.dtype).clamp_min(self.eps)).clamp(max=1.0)
-        alpha = self.alpha_max * uncertainty.clamp(0.0, 1.0).pow(self.beta) * support
+        uncertainty_gate = uncertainty.clamp(0.0, 1.0).pow(self.beta)
         q = p
+        original_top = p.argmax(dim=1, keepdim=True)
         class_kernel = kernel.expand(p.shape[1], 1, *kernel.shape[2:]).contiguous()
         for _ in range(self.iterations):
             weighted = q * reliability
             neighbor = F.conv3d(weighted, class_kernel, padding=self.radius, groups=p.shape[1])
             neighbor = neighbor / z.clamp_min(self.eps)
-            alternative = (1.0 - p) * neighbor
-            alternative_sum = alternative.sum(dim=1, keepdim=True)
-            alternative = torch.where(
-                alternative_sum > self.eps,
-                alternative / alternative_sum.clamp_min(self.eps),
+            neighbor_sum = neighbor.sum(dim=1, keepdim=True)
+            neighbor = torch.where(
+                neighbor_sum > self.eps,
+                neighbor / neighbor_sum.clamp_min(self.eps),
                 p,
             )
-            q = (1.0 - alpha) * p + alpha * alternative
-            q = q / q.sum(dim=1, keepdim=True).clamp_min(self.eps)
+            top_two = neighbor.topk(k=2, dim=1).values
+            neighbor_margin = top_two[:, :1] - top_two[:, 1:2]
+            consensus_gate = (
+                (neighbor_margin - self.consensus_margin)
+                / (1.0 - self.consensus_margin)
+            ).clamp(0.0, 1.0)
+            alpha = self.alpha_max * uncertainty_gate * support * consensus_gate
+            candidate = (1.0 - alpha) * p + alpha * neighbor
+            candidate = candidate / candidate.sum(dim=1, keepdim=True).clamp_min(self.eps)
+
+            candidate_top = candidate.argmax(dim=1, keepdim=True)
+            neighbor_top = neighbor.argmax(dim=1, keepdim=True)
+            keeps_top = candidate_top == original_top
+            safe_change = (
+                (neighbor_top != original_top)
+                & (candidate_top == neighbor_top)
+                & (neighbor_margin >= self.class_change_margin)
+            )
+            q = torch.where(keeps_top | safe_change, candidate, p)
         return q
