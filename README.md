@@ -118,16 +118,13 @@ checkpoint fails without relabeling `last_calibration.pt` as a best model.
 Standalone evaluation controls refinement strength with
 `evaluation.refine_strength_scale` (default `1.0`). With the default
 `label_transfer.alpha_max=0.35`, the effective update ceiling remains `0.35`.
-Refinement mixes the original atomic probabilities with the normalized reliable
-neighborhood distribution only when the neighborhood top-two margin exceeds
-`label_transfer.consensus_margin=0.25`. A top-1 class change additionally
-requires an opposing neighborhood consensus of at least
-`label_transfer.class_change_margin=0.30`. The neighborhood distribution and
-gate are recomputed for each of the three refinement iterations while the
-original probabilities remain the update anchor. These thresholds are plain
-configuration attributes and do not change checkpoint state. The base value,
-multiplier, and effective value are saved in `checkpoint_metadata.json`;
-calibration, Z0 fitting, and checkpoint parameters are unchanged.
+Refinement directly mixes the original atomic probabilities with the normalized
+reliable-neighborhood distribution using uncertainty and neighborhood support;
+it does not apply a separate consensus gate. The neighborhood distribution is
+recomputed for each of the three refinement iterations while the original
+probabilities remain the update anchor. The base value, multiplier, and
+effective value are saved in `checkpoint_metadata.json`; calibration, Z0
+fitting, and checkpoint parameters are unchanged.
 
 If the configured split JSON is absent, the training entry point generates the
 deterministic center-based splits before constructing data loaders. Run

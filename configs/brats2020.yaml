@@ -65,8 +65,6 @@ label_transfer:
   alpha_max: 0.35
   beta: 2.0
   iterations: 3
-  consensus_margin: 0.25
-  class_change_margin: 0.30
   z0_quantile: 0.5
 
 training:

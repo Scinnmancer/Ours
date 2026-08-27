@@ -406,26 +406,6 @@ def test_legacy_config_without_margin_gradient_remains_valid():
     validate_config(config)
 
 
-@pytest.mark.parametrize(
-    ("consensus_margin", "class_change_margin"),
-    [(-0.1, 0.3), (1.0, 1.0), (0.4, 0.3), (0.25, 1.1)],
-)
-def test_refinement_consensus_config_rejects_invalid_margins(
-    consensus_margin,
-    class_change_margin,
-):
-    config = _config()
-    config["label_transfer"]["consensus_margin"] = consensus_margin
-    config["label_transfer"]["class_change_margin"] = class_change_margin
-
-    with pytest.raises(ValueError, match="label_transfer.*margin"):
-        validate_config(config)
-
-
-def test_legacy_config_without_refinement_consensus_margins_remains_valid():
-    validate_config(_config())
-
-
 def test_legacy_frozen_flag_maps_to_head_only_margin_calibration():
     model = _RiskOnlyToyModel()
     parameters = configure_calibration_trainability(model, True)
