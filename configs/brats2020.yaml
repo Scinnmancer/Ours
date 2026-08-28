@@ -91,8 +91,8 @@ training:
 evaluation:
   splits: [val, test_CBICA, test_2013, test_TMC]
   workers: 0
-  # Keep the test-time refine ceiling at label_transfer.alpha_max = 0.35.
-  refine_strength_scale: 1.0
+  # Test-only multiplier: effective refine alpha_max is 0.35 * 2.0 = 0.70.
+  refine_strength_scale: 2.0
   max_metric_voxels: 200000
   calibration_bins: 15
   high_confidence_threshold: 0.95

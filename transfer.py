@@ -62,12 +62,13 @@ class UncertaintyGatedLabelTransfer(nn.Module):
             weighted = q * reliability
             neighbor = F.conv3d(weighted, class_kernel, padding=self.radius, groups=p.shape[1])
             neighbor = neighbor / z.clamp_min(self.eps)
-            neighbor_sum = neighbor.sum(dim=1, keepdim=True)
-            neighbor = torch.where(
-                neighbor_sum > self.eps,
-                neighbor / neighbor_sum.clamp_min(self.eps),
+            alternative = (1.0 - p) * neighbor
+            alternative_sum = alternative.sum(dim=1, keepdim=True)
+            alternative = torch.where(
+                alternative_sum > self.eps,
+                alternative / alternative_sum.clamp_min(self.eps),
                 p,
             )
-            q = (1.0 - alpha) * p + alpha * neighbor
+            q = (1.0 - alpha) * p + alpha * alternative
             q = q / q.sum(dim=1, keepdim=True).clamp_min(self.eps)
         return q
