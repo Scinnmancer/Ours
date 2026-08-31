@@ -122,6 +122,30 @@ base value, multiplier, and effective value are saved in
 `checkpoint_metadata.json`; calibration, Z0 fitting, and checkpoint parameters
 are unchanged.
 
+Refine-only parameter tuning is available as a one-click evaluation. It searches
+the configured `evaluation.refine_tuning.beta_values` and `strength_scales` on
+`source_val`, applies the Dice guardrail, and selects the lowest ordinary ECE
+(higher Dice breaks an exactly equal ECE). The expensive network and geometric
+uncertainty inference runs once per validation case; all candidates reuse those
+base outputs and differ only in label-transfer parameters. The selected setting
+is then evaluated once on all configured splits:
+
+```bash
+cd /path/to/parent-containing-ours
+CHECKPOINT=ours/runs/dual_swin_zernike_brats2020/final.pt \
+  bash ours/run_refine_tuning.sh
+```
+
+Set `OUTPUT`, `CONFIG`, or `PYTHON_BIN` as environment variables when needed.
+Pass `--skip-final` to search without the final multi-center test and `--force`
+to ignore reusable completed results. The default search uses 16 combinations
+of `beta=[2.0,2.5,3.0,3.5]` and strength scale
+`[2.0,2.25,2.4,2.6]`; `iterations` remains 3 and no training or calibration
+stage is invoked. Results are written to `refine_tuning/candidates.csv`,
+`selection.json`, per-candidate source-validation directories, and
+`final__<selected-parameters>/`; console output is also saved as
+`refine_tuning.log`.
+
 If the configured split JSON is absent, the training entry point generates the
 deterministic center-based splits before constructing data loaders. Run
 `ours.prepare` explicitly when full path, affine, spacing, and label validation

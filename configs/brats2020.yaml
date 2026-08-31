@@ -93,6 +93,12 @@ evaluation:
   workers: 0
   # Test-only multiplier: effective refine alpha_max is 0.35 * 2.0 = 0.70.
   refine_strength_scale: 2.0
+  # Refine-only validation search. The network is inferred once per source case;
+  # all beta/strength combinations reuse the same base probability and uncertainty.
+  refine_tuning:
+    beta_values: [2.0, 2.5, 3.0, 3.5]
+    strength_scales: [2.0, 2.25, 2.4, 2.6]
+    dice_tolerance: 0.0002
   max_metric_voxels: 200000
   calibration_bins: 15
   high_confidence_threshold: 0.95
