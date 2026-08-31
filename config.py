@@ -95,34 +95,6 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "label_transfer.alpha_max * evaluation.refine_strength_scale must be less than 1"
         )
-    refine_tuning = config["evaluation"].get("refine_tuning", {})
-    if not isinstance(refine_tuning, dict):
-        raise ValueError("evaluation.refine_tuning must be a mapping")
-    beta_values = refine_tuning.get("beta_values", [2.0, 2.5, 3.0, 3.5])
-    strength_scales = refine_tuning.get("strength_scales", [2.0, 2.25, 2.4, 2.6])
-    if not isinstance(beta_values, (list, tuple)) or not beta_values:
-        raise ValueError("evaluation.refine_tuning.beta_values must be a non-empty list")
-    if not isinstance(strength_scales, (list, tuple)) or not strength_scales:
-        raise ValueError(
-            "evaluation.refine_tuning.strength_scales must be a non-empty list"
-        )
-    if any(not math.isfinite(float(value)) or float(value) < 0.0 for value in beta_values):
-        raise ValueError(
-            "evaluation.refine_tuning.beta_values must contain finite non-negative values"
-        )
-    if any(
-        not math.isfinite(float(value))
-        or float(value) <= 0.0
-        or alpha * float(value) >= 1.0
-        for value in strength_scales
-    ):
-        raise ValueError(
-            "evaluation.refine_tuning.strength_scales must contain finite positive "
-            "values whose effective alpha_max is less than 1"
-        )
-    refine_dice_tolerance = float(refine_tuning.get("dice_tolerance", 0.0002))
-    if not math.isfinite(refine_dice_tolerance) or refine_dice_tolerance < 0.0:
-        raise ValueError("evaluation.refine_tuning.dice_tolerance must be non-negative")
     for key in ("warmup_epochs", "calibration_epochs", "validation_every"):
         if int(config["training"].get(key, 0)) <= 0:
             raise ValueError(f"training.{key} must be a positive integer")
