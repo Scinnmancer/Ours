@@ -95,6 +95,51 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "label_transfer.alpha_max * evaluation.refine_strength_scale must be less than 1"
         )
+    refine_tuning = config["evaluation"].get("refine_tuning", {})
+    if not isinstance(refine_tuning, dict):
+        raise ValueError("evaluation.refine_tuning must be a mapping")
+    beta_values = refine_tuning.get("beta_values", [1.0, 1.5, 2.0])
+    strength_scales = refine_tuning.get(
+        "strength_scales", [1.0, 1.5, 2.0, 2.4]
+    )
+    if not isinstance(beta_values, (list, tuple)) or not beta_values:
+        raise ValueError("evaluation.refine_tuning.beta_values must be a non-empty list")
+    if not isinstance(strength_scales, (list, tuple)) or not strength_scales:
+        raise ValueError(
+            "evaluation.refine_tuning.strength_scales must be a non-empty list"
+        )
+    if any(
+        not math.isfinite(float(value)) or float(value) < 0.0
+        for value in beta_values
+    ):
+        raise ValueError(
+            "evaluation.refine_tuning.beta_values must contain finite non-negative values"
+        )
+    if any(
+        not math.isfinite(float(value))
+        or float(value) <= 0.0
+        or alpha * float(value) >= 1.0
+        for value in strength_scales
+    ):
+        raise ValueError(
+            "evaluation.refine_tuning.strength_scales must contain finite positive "
+            "values whose effective alpha_max is less than 1"
+        )
+    for key, default in (
+        ("dice_tolerance", 0.0),
+        ("fallback_dice_tolerance", 0.0002),
+        ("ece_tie_tolerance", 0.001),
+    ):
+        value = float(refine_tuning.get(key, default))
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"evaluation.refine_tuning.{key} must be non-negative")
+    if float(refine_tuning.get("fallback_dice_tolerance", 0.0002)) < float(
+        refine_tuning.get("dice_tolerance", 0.0)
+    ):
+        raise ValueError(
+            "evaluation.refine_tuning.fallback_dice_tolerance must be greater "
+            "than or equal to dice_tolerance"
+        )
     for key in ("warmup_epochs", "calibration_epochs", "validation_every"):
         if int(config["training"].get(key, 0)) <= 0:
             raise ValueError(f"training.{key} must be a positive integer")

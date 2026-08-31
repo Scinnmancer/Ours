@@ -63,7 +63,8 @@ label_transfer:
   sigma: 1.0
   gamma: 2.0
   alpha_max: 0.35
-  beta: 2.0
+  # Central refine-only setting; the one-click sweep selects beta/strength on source_val.
+  beta: 1.5
   iterations: 3
   z0_quantile: 0.5
 
@@ -91,8 +92,17 @@ training:
 evaluation:
   splits: [val, test_CBICA, test_2013, test_TMC]
   workers: 0
-  # Keep the test-time refine ceiling at label_transfer.alpha_max = 0.35.
-  refine_strength_scale: 1.0
+  # Central test-only setting: effective alpha ceiling is 0.35 * 2.0 = 0.70.
+  refine_strength_scale: 2.0
+  # Refine-only search. Network/geometric inference runs once per source case;
+  # all 12 candidates reuse the same base probability and uncertainty tensors.
+  refine_tuning:
+    beta_values: [1.0, 1.5, 2.0]
+    strength_scales: [1.0, 1.5, 2.0, 2.4]
+    # Prefer no Dice loss. A 0.0002 fallback is explicitly marked diagnostic.
+    dice_tolerance: 0.0
+    fallback_dice_tolerance: 0.0002
+    ece_tie_tolerance: 0.001
   max_metric_voxels: 200000
   calibration_bins: 15
   high_confidence_threshold: 0.95
