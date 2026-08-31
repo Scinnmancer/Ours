@@ -24,16 +24,16 @@ def _candidate(name: str, ece: float, dice: float, base_dice: float = 0.83):
     }
 
 
-def test_default_refine_grid_contains_central_smoothing_setting():
+def test_default_refine_grid_contains_recommended_high_uncertainty_setting():
     config_path = Path(__import__("ours").__path__[0]) / "configs" / "brats2020.yaml"
     config = load_config(config_path)
     candidates = build_candidates(config)
 
-    assert len(candidates) == 12
+    assert len(candidates) == 16
     assert any(
-        candidate["beta"] == 1.5
-        and candidate["refine_strength_scale"] == 2.0
-        and candidate["effective_alpha_max"] == pytest.approx(0.70)
+        candidate["beta"] == 3.0
+        and candidate["refine_strength_scale"] == 2.4
+        and candidate["effective_alpha_max"] == pytest.approx(0.84)
         for candidate in candidates
     )
     assert all(float(candidate["effective_alpha_max"]) < 1.0 for candidate in candidates)
@@ -58,19 +58,6 @@ def test_selection_uses_higher_dice_only_for_equal_ece():
         _candidate("higher-dice", 0.08, 0.84),
     ]
     assert select_candidate(candidates, dice_tolerance=0.0002) is candidates[1]
-
-
-def test_selection_uses_higher_dice_inside_configured_ece_tie_band():
-    candidates = [
-        _candidate("slightly-lower-ece", 0.0800, 0.8300),
-        _candidate("higher-dice", 0.0808, 0.8400),
-    ]
-    assert (
-        select_candidate(
-            candidates, dice_tolerance=0.0, ece_tie_tolerance=0.001
-        )
-        is candidates[1]
-    )
 
 
 def test_fast_source_selection_matches_full_dice_and_ece():
@@ -105,35 +92,6 @@ def test_fast_source_selection_matches_full_dice_and_ece():
 
     assert fast["mean_dice"] == pytest.approx(full["mean_dice"])
     assert fast["basic_ece"] == pytest.approx(full["basic_ece"])
-    assert fast["mean_top_confidence"] == pytest.approx(0.85)
-    assert fast["mean_entropy"] > 0.0
-    assert fast["top1_flip_rate"] == 0.0
-
-
-def test_confidence_diagnostics_measure_smoothing_and_top1_changes():
-    probability = torch.zeros(1, 4, 2, 2, 2)
-    probability[:, 0] = 0.7
-    probability[:, 1] = 0.3
-    target = torch.zeros(1, 1, 2, 2, 2, dtype=torch.uint8)
-    probability[:, 0, 0, 0, 0] = 0.3
-    probability[:, 1, 0, 0, 0] = 0.7
-    target[:, :, 0, 0, 0] = 1
-    prediction = _atomic_prediction(probability)
-    reference = 1 - prediction
-
-    metrics = _evaluate_selection_case(
-        probability,
-        target,
-        prediction,
-        _region_prediction_from_atomic(probability),
-        bins=15,
-        max_voxels=200000,
-        reference_prediction=reference,
-    )
-
-    assert metrics["mean_top_confidence"] == pytest.approx(0.7)
-    assert metrics["p95_top_confidence"] == pytest.approx(0.7)
-    assert metrics["top1_flip_rate"] == pytest.approx(1.0)
 
 
 def test_one_click_tuning_runs_source_sweep_then_final_once(tmp_path, monkeypatch):
@@ -147,31 +105,21 @@ def test_one_click_tuning_runs_source_sweep_then_final_once(tmp_path, monkeypatc
             candidate_output = sweep_output / "source_val" / str(candidate["name"])
             candidate_output.mkdir(parents=True, exist_ok=True)
             is_winner = (
-                candidate["beta"] == 1.5
-                and candidate["refine_strength_scale"] == 2.0
+                candidate["beta"] == 3.0
+                and candidate["refine_strength_scale"] == 2.4
             )
-            diagnostics = {
-                "mean_top_confidence": 0.8,
-                "p95_top_confidence": 0.95,
-                "mean_error_top_confidence": 0.9,
-                "mean_entropy": 0.4,
-                "high_confidence_error_rate": 0.03,
-                "top1_flip_rate": 0.0,
-            }
             rows = [
                 {
                     "domain": "source_val",
                     "prediction": "base",
                     "mean_dice": 0.83,
                     "basic_ece": 0.12,
-                    **diagnostics,
                 },
                 {
                     "domain": "source_val",
                     "prediction": "refined",
                     "mean_dice": 0.8301,
                     "basic_ece": 0.08 if is_winner else 0.10,
-                    **diagnostics,
                 },
             ]
             (candidate_output / "summary_metrics.json").write_text(json.dumps(rows))
@@ -196,8 +144,7 @@ def test_one_click_tuning_runs_source_sweep_then_final_once(tmp_path, monkeypatc
     run_tuning(str(config_path), str(checkpoint), str(output))
 
     selection = json.loads((output / "selection.json").read_text())
-    assert selection["best"]["beta"] == 1.5
-    assert selection["best"]["refine_strength_scale"] == 2.0
-    assert selection["selection_tier"] == "strict"
-    assert final_calls == [(1.5, 2.0)]
+    assert selection["best"]["beta"] == 3.0
+    assert selection["best"]["refine_strength_scale"] == 2.4
+    assert final_calls == [(3.0, 2.4)]
     assert (output / "candidates.csv").is_file()

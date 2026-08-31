@@ -10,7 +10,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 cd "${ROOT_DIR}"
 mkdir -p "${OUTPUT}"
 
-echo "[one-click] 12-setting refine-only search on source_val; external centers evaluate the selected setting once"
+echo "[one-click] searching refine beta/strength on source_val, then testing the winner"
 "${PYTHON_BIN}" -m ours.tune_refine \
   --config "${CONFIG}" \
   --checkpoint "${CHECKPOINT}" \

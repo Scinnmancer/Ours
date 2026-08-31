@@ -35,7 +35,7 @@ from .test import (
 
 
 _SWEEP_SIGNATURE = "refine_sweep_input.json"
-_SWEEP_VERSION = 2
+_SWEEP_VERSION = 1
 
 
 def candidate_name(beta: float, strength_scale: float) -> str:
@@ -46,10 +46,10 @@ def candidate_name(beta: float, strength_scale: float) -> str:
 
 def build_candidates(config: dict[str, Any]) -> list[dict[str, float | str]]:
     tuning = config["evaluation"].get("refine_tuning", {})
-    beta_values = [float(value) for value in tuning.get("beta_values", [1.0, 1.5, 2.0])]
+    beta_values = [float(value) for value in tuning.get("beta_values", [2.0, 2.5, 3.0, 3.5])]
     strength_scales = [
         float(value)
-        for value in tuning.get("strength_scales", [1.0, 1.5, 2.0, 2.4])
+        for value in tuning.get("strength_scales", [2.0, 2.25, 2.4, 2.6])
     ]
     alpha_max = float(config["label_transfer"].get("alpha_max", 0.35))
     candidates: list[dict[str, float | str]] = []
@@ -72,11 +72,9 @@ def build_candidates(config: dict[str, Any]) -> list[dict[str, float | str]]:
 
 
 def select_candidate(
-    candidates: list[dict[str, Any]],
-    dice_tolerance: float,
-    ece_tie_tolerance: float = 0.001,
+    candidates: list[dict[str, Any]], dice_tolerance: float
 ) -> dict[str, Any] | None:
-    """Minimize ordinary ECE after a Dice guardrail, with a stable ECE tie band."""
+    """Minimize ordinary ECE after a Dice guardrail; use Dice only on equal ECE."""
     best: dict[str, Any] | None = None
     for candidate in candidates:
         base_dice = float(candidate["base_mean_dice"])
@@ -96,10 +94,7 @@ def select_candidate(
             continue
         best_ece = float(best["basic_ece"])
         best_dice = float(best["mean_dice"])
-        if ece < best_ece - ece_tie_tolerance or (
-            abs(ece - best_ece) <= ece_tie_tolerance
-            and refined_dice > best_dice
-        ):
+        if ece < best_ece or (ece == best_ece and refined_dice > best_dice):
             best = candidate
     return best
 
@@ -112,10 +107,8 @@ def _evaluate_selection_case(
     *,
     bins: int,
     max_voxels: int,
-    high_confidence_threshold: float = 0.95,
-    reference_prediction: torch.Tensor | None = None,
 ) -> dict[str, float]:
-    """Compute selection metrics and confidence diagnostics for one case."""
+    """Compute only Dice and ordinary ECE during the parameter search."""
     probability = atomic_probability.detach().float().cpu()
     if probability.ndim == 5:
         probability = probability[0]
@@ -146,41 +139,13 @@ def _evaluate_selection_case(
     sampled_probability = probability.reshape(4, -1)[:, indices]
     sampled_target = atomic_target.reshape(-1)[indices]
     sampled_prediction = prediction.reshape(-1)[indices]
-    confidence_tensor = torch.amax(sampled_probability, dim=0)
-    confidence = confidence_tensor.numpy()
-    correct_tensor = sampled_prediction == sampled_target
-    correct = correct_tensor.numpy().astype(np.float32)
+    confidence = torch.amax(sampled_probability, dim=0).numpy()
+    correct = (sampled_prediction == sampled_target).numpy().astype(np.float32)
     basic_ece = expected_calibration_error(confidence, correct, bins)
-    entropy = -(
-        sampled_probability.clamp_min(torch.finfo(sampled_probability.dtype).eps)
-        * sampled_probability.clamp_min(torch.finfo(sampled_probability.dtype).eps).log()
-    ).sum(dim=0)
-    errors = ~correct_tensor
-    error_top_confidence = (
-        float(confidence_tensor[errors].mean()) if bool(errors.any()) else float("nan")
-    )
-    if reference_prediction is None:
-        top1_flip_rate = 0.0
-    else:
-        reference = reference_prediction.detach().cpu().to(torch.uint8)
-        if reference.ndim == 4 and reference.shape[0] == 1:
-            reference = reference[0]
-        if reference.shape != prediction.shape:
-            raise ValueError("reference_prediction must match atomic_prediction")
-        sampled_reference = reference.reshape(-1)[indices]
-        top1_flip_rate = float((sampled_prediction != sampled_reference).float().mean())
     return {
         "mean_dice": float(np.nanmean(dice)),
         "basic_ece": basic_ece,
         "ece": basic_ece,
-        "mean_top_confidence": float(confidence_tensor.mean()),
-        "p95_top_confidence": float(torch.quantile(confidence_tensor, 0.95)),
-        "mean_error_top_confidence": error_top_confidence,
-        "mean_entropy": float(entropy.mean()),
-        "high_confidence_error_rate": float(
-            ((confidence_tensor >= high_confidence_threshold) & errors).float().mean()
-        ),
-        "top1_flip_rate": top1_flip_rate,
         **{name: value for name, value in zip(("dice_TC", "dice_WT", "dice_ET"), dice)},
     }
 
@@ -247,9 +212,6 @@ def run_source_sweep(
     evaluation = config["evaluation"]
     bins = int(evaluation.get("calibration_bins", 15))
     max_voxels = int(evaluation.get("max_metric_voxels", 200000))
-    high_confidence_threshold = float(
-        evaluation.get("high_confidence_threshold", 0.95)
-    )
     loader = build_loader(config, "val", "test")
     base_rows: list[dict[str, Any]] = []
     refined_rows: dict[str, list[dict[str, Any]]] = {
@@ -283,7 +245,6 @@ def run_source_sweep(
             base_region_prediction,
             bins=bins,
             max_voxels=max_voxels,
-            high_confidence_threshold=high_confidence_threshold,
         )
         base_rows.append(
             {
@@ -317,8 +278,6 @@ def run_source_sweep(
                 refined_region_prediction,
                 bins=bins,
                 max_voxels=max_voxels,
-                high_confidence_threshold=high_confidence_threshold,
-                reference_prediction=base_atomic_prediction,
             )
             refined_rows[name].append(
                 {
@@ -385,30 +344,6 @@ def _collect_candidate_metrics(
                 - float(base["mean_dice"]),
                 "delta_basic_ece": float(refined["basic_ece"])
                 - float(base["basic_ece"]),
-                "mean_top_confidence": float(refined["mean_top_confidence"]),
-                "delta_mean_top_confidence": float(refined["mean_top_confidence"])
-                - float(base["mean_top_confidence"]),
-                "p95_top_confidence": float(refined["p95_top_confidence"]),
-                "delta_p95_top_confidence": float(refined["p95_top_confidence"])
-                - float(base["p95_top_confidence"]),
-                "mean_error_top_confidence": float(
-                    refined["mean_error_top_confidence"]
-                ),
-                "delta_mean_error_top_confidence": float(
-                    refined["mean_error_top_confidence"]
-                )
-                - float(base["mean_error_top_confidence"]),
-                "mean_entropy": float(refined["mean_entropy"]),
-                "delta_mean_entropy": float(refined["mean_entropy"])
-                - float(base["mean_entropy"]),
-                "high_confidence_error_rate": float(
-                    refined["high_confidence_error_rate"]
-                ),
-                "delta_high_confidence_error_rate": float(
-                    refined["high_confidence_error_rate"]
-                )
-                - float(base["high_confidence_error_rate"]),
-                "top1_flip_rate": float(refined["top1_flip_rate"]),
                 "output": str(summary_path.parent),
             }
         )
@@ -474,18 +409,6 @@ def _write_candidates_csv(path: Path, candidates: list[dict[str, Any]]) -> None:
         "basic_ece",
         "delta_mean_dice",
         "delta_basic_ece",
-        "mean_top_confidence",
-        "delta_mean_top_confidence",
-        "p95_top_confidence",
-        "delta_p95_top_confidence",
-        "mean_error_top_confidence",
-        "delta_mean_error_top_confidence",
-        "mean_entropy",
-        "delta_mean_entropy",
-        "high_confidence_error_rate",
-        "delta_high_confidence_error_rate",
-        "top1_flip_rate",
-        "selection_tier",
         "eligible",
         "output",
     ]
@@ -509,9 +432,7 @@ def run_tuning(
     config = load_config(config_path)
     candidates = build_candidates(config)
     tuning = config["evaluation"].get("refine_tuning", {})
-    dice_tolerance = float(tuning.get("dice_tolerance", 0.0))
-    fallback_dice_tolerance = float(tuning.get("fallback_dice_tolerance", 0.0002))
-    ece_tie_tolerance = float(tuning.get("ece_tie_tolerance", 0.001))
+    dice_tolerance = float(tuning.get("dice_tolerance", 0.0002))
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     save_run_metadata(output, config)
@@ -529,31 +450,15 @@ def run_tuning(
         _write_json(output / _SWEEP_SIGNATURE, signature)
 
     collected = _collect_candidate_metrics(output, candidates)
-    best = select_candidate(collected, dice_tolerance, ece_tie_tolerance)
-    selection_tier = "strict"
-    if best is None and fallback_dice_tolerance > dice_tolerance:
-        best = select_candidate(
-            collected, fallback_dice_tolerance, ece_tie_tolerance
-        )
-        selection_tier = "diagnostic_fallback"
-    for candidate in collected:
-        candidate["selection_tier"] = (
-            selection_tier if candidate is best else "not_selected"
-        )
+    best = select_candidate(collected, dice_tolerance)
     _write_candidates_csv(output / "candidates.csv", collected)
     _write_json(output / "candidates.json", collected, allow_nan=False)
     final_output = output / f"final__{best['name']}" if best is not None else None
     selection = {
         "selection_split": "source_val",
         "selection_metric": "basic_ece",
-        "selection_rule": (
-            "minimum basic_ece after Dice guardrail; higher Dice breaks an ECE "
-            "difference within ece_tie_tolerance"
-        ),
+        "selection_rule": "minimum basic_ece after Dice guardrail; higher Dice breaks equal ECE",
         "dice_tolerance": dice_tolerance,
-        "fallback_dice_tolerance": fallback_dice_tolerance,
-        "ece_tie_tolerance": ece_tie_tolerance,
-        "selection_tier": selection_tier if best is not None else "none",
         "checkpoint": str(Path(checkpoint).resolve()),
         "candidates": collected,
         "best": best,
@@ -564,7 +469,7 @@ def run_tuning(
     _write_json(selection_path, selection)
     if best is None:
         raise RuntimeError(
-            f"No refine candidate passed either Dice guardrail; see {selection_path}"
+            f"No refine candidate passed the Dice guardrail; see {selection_path}"
         )
 
     print(
@@ -572,8 +477,7 @@ def run_tuning(
         f"beta={float(best['beta']):g}, "
         f"scale={float(best['refine_strength_scale']):g}, "
         f"source_val ECE={float(best['basic_ece']):.6f}, "
-        f"Dice={float(best['mean_dice']):.6f}, "
-        f"tier={selection_tier}",
+        f"Dice={float(best['mean_dice']):.6f}",
         flush=True,
     )
     if run_final and final_output is not None:

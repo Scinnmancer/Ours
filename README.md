@@ -115,21 +115,20 @@ passing the configured Dice tolerance. Equal ECE keeps the earlier checkpoint;
 Risk ECE, Risk Brier, and Dice do not break ties. A run with no Dice-eligible
 checkpoint fails without relabeling `last_calibration.pt` as a best model.
 
-Standalone evaluation controls refinement strength with
-`evaluation.refine_strength_scale` (central value `2.0`). With
-`label_transfer.alpha_max=0.35`, the central effective update ceiling is
-`0.70`. The central uncertainty exponent is `label_transfer.beta=1.5`, which
-extends smoothing from only the highest-uncertainty voxels to moderately
-uncertain voxels.
-Refinement directly mixes the original atomic probabilities with the normalized
-reliable-neighborhood distribution using uncertainty and neighborhood support;
-it does not apply a separate consensus gate. The neighborhood distribution is
-recomputed for each of the three refinement iterations while the original
-probabilities remain the update anchor. The base value, multiplier, and
-effective value are saved in `checkpoint_metadata.json`; calibration, Z0
-fitting, and checkpoint parameters are unchanged.
+Standalone evaluation strengthens refinement only at test time with
+`evaluation.refine_strength_scale` (default `2.0`). With the default
+`label_transfer.alpha_max=0.35`, the effective update ceiling is `0.70`. The
+base value, multiplier, and effective value are saved in
+`checkpoint_metadata.json`; calibration, Z0 fitting, and checkpoint parameters
+are unchanged.
 
-Use the one-click refine-only search to choose parameters without retraining:
+Refine-only parameter tuning is available as a one-click evaluation. It searches
+the configured `evaluation.refine_tuning.beta_values` and `strength_scales` on
+`source_val`, applies the Dice guardrail, and selects the lowest ordinary ECE
+(higher Dice breaks an exactly equal ECE). The expensive network and geometric
+uncertainty inference runs once per validation case; all candidates reuse those
+base outputs and differ only in label-transfer parameters. The selected setting
+is then evaluated once on all configured splits:
 
 ```bash
 cd /path/to/parent-containing-ours
@@ -137,21 +136,15 @@ CHECKPOINT=ours/runs/dual_swin_zernike_brats2020/final.pt \
   bash ours/run_refine_tuning.sh
 ```
 
-The script infers each `source_val` case once, then reuses the base probability
-and geometric uncertainty for 12 combinations of `beta=[1.0,1.5,2.0]` and
-strength scale `[1.0,1.5,2.0,2.4]`; `iterations` remains 3. A candidate must
-first avoid any source-validation Dice loss, and ordinary segmentation ECE then
-selects the winner. If none passes, a candidate within `0.0002` Dice is marked
-`diagnostic_fallback` instead of being presented as a strict winner. ECE values
-within `0.001` use higher Dice as the stable tie-breaker. Only the selected
-setting is subsequently evaluated on the configured external centers.
-
-Set `OUTPUT`, `CONFIG`, or `PYTHON_BIN` to override their defaults. Use
-`--skip-final` for source validation only and `--force` to rerun completed
-inputs. Results are written to `refine_tuning/candidates.csv`,
-`selection.json`, each source-validation candidate directory, and
-`final__<selected-parameters>/`. Candidate reports include top-confidence,
-error-confidence, entropy, high-confidence-error, and top-1-flip diagnostics.
+Set `OUTPUT`, `CONFIG`, or `PYTHON_BIN` as environment variables when needed.
+Pass `--skip-final` to search without the final multi-center test and `--force`
+to ignore reusable completed results. The default search uses 16 combinations
+of `beta=[2.0,2.5,3.0,3.5]` and strength scale
+`[2.0,2.25,2.4,2.6]`; `iterations` remains 3 and no training or calibration
+stage is invoked. Results are written to `refine_tuning/candidates.csv`,
+`selection.json`, per-candidate source-validation directories, and
+`final__<selected-parameters>/`; console output is also saved as
+`refine_tuning.log`.
 
 If the configured split JSON is absent, the training entry point generates the
 deterministic center-based splits before constructing data loaders. Run
