@@ -23,7 +23,7 @@ from .reproducibility import save_run_metadata, set_reproducibility
 
 def _configure_test_time_refinement(
     model: DualHeadSwinUNETR, config: dict[str, Any]
-) -> dict[str, float | str]:
+) -> dict[str, float]:
     """Increase label-transfer strength for evaluation without changing checkpoints."""
     base_alpha_max = float(model.label_transfer.alpha_max)
     strength_scale = float(config["evaluation"].get("refine_strength_scale", 1.0))
@@ -42,7 +42,6 @@ def _configure_test_time_refinement(
         "refine_base_alpha_max": base_alpha_max,
         "refine_strength_scale": strength_scale,
         "refine_effective_alpha_max": effective_alpha_max,
-        "refine_direction_mode": model.label_transfer.direction_mode,
     }
 
 

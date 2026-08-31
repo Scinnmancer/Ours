@@ -88,14 +88,6 @@ def validate_config(config: dict[str, Any]) -> None:
     alpha = float(config["label_transfer"].get("alpha_max", 0.35))
     if not 0.0 <= alpha < 1.0:
         raise ValueError("label_transfer.alpha_max must be in [0, 1)")
-    direction_mode = str(
-        config["label_transfer"].get("direction_mode", "legacy_complement")
-    )
-    if direction_mode not in ("legacy_complement", "local_excess_confidence"):
-        raise ValueError(
-            "label_transfer.direction_mode must be legacy_complement or "
-            "local_excess_confidence"
-        )
     refine_scale = float(config["evaluation"].get("refine_strength_scale", 1.0))
     if not math.isfinite(refine_scale) or refine_scale <= 0.0:
         raise ValueError("evaluation.refine_strength_scale must be finite and greater than 0")
