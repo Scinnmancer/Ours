@@ -122,6 +122,40 @@ base value, multiplier, and effective value are saved in
 `checkpoint_metadata.json`; calibration, Z0 fitting, and checkpoint parameters
 are unchanged.
 
+The default refine direction is `local_excess_confidence`. At each iteration it
+compares the original top-1 confidence with the reliable-neighbor support for
+that same class. Strong unsupported confidence retains the established
+complement correction, while locally supported confidence follows ordinary
+neighbor propagation. The interpolation is continuous and parameter-free; it
+adds no hard gate, model parameter, buffer, training stage, or checkpoint key.
+Set `label_transfer.direction_mode=legacy_complement` to reproduce the previous
+best refinement exactly.
+
+Run the complete source-validation A/B selection and final evaluation with one
+command:
+
+```bash
+bash ours/run_refine_tuning.sh
+```
+
+It evaluates the legacy complement direction and the new continuous direction
+only on `source_val`, with the already established `beta=2.0` and effective
+`alpha_max=0.70`. Candidates whose refined Dice falls more than `0.001` below
+the matching base Dice are rejected; ordinary `basic_ece` selects among the
+remaining candidates, with ties retaining the earlier legacy baseline. The
+best candidate of each direction is then evaluated once on all configured
+splits, and the two held-out results are combined in `final_comparison.csv`.
+Results are written to `runs/<experiment>/refine_tuning/`, completed runs are
+reusable after interruption, `--force` reruns them, and `--skip-final` performs
+validation only. Held-out centers never select the method. Set `CHECKPOINT`,
+`CONFIG`, `OUTPUT`, or `PYTHON_BIN` as environment variables when server paths
+differ.
+
+The formula, failure cases, and reviewer-facing acceptance criteria are in
+[`REFINE_LOCAL_EXCESS_CONFIDENCE.md`](REFINE_LOCAL_EXCESS_CONFIDENCE.md); the
+separate design review and conditional decision are in
+[`REFINE_METHOD_REVIEW.md`](REFINE_METHOD_REVIEW.md).
+
 If the configured split JSON is absent, the training entry point generates the
 deterministic center-based splits before constructing data loaders. Run
 `ours.prepare` explicitly when full path, affine, spacing, and label validation

@@ -18,13 +18,10 @@ def test_test_time_refine_strength_doubles_alpha_max_without_state_change():
     )
 
     assert transfer.alpha_max == pytest.approx(0.70)
-    assert metadata == pytest.approx(
-        {
-            "refine_base_alpha_max": 0.35,
-            "refine_strength_scale": 2.0,
-            "refine_effective_alpha_max": 0.70,
-        }
-    )
+    assert metadata["refine_direction_mode"] == "legacy_complement"
+    assert metadata["refine_base_alpha_max"] == pytest.approx(0.35)
+    assert metadata["refine_strength_scale"] == pytest.approx(2.0)
+    assert metadata["refine_effective_alpha_max"] == pytest.approx(0.70)
     for key, value in transfer.state_dict().items():
         torch.testing.assert_close(value, state_before[key])
 

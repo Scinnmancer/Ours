@@ -65,6 +65,8 @@ label_transfer:
   alpha_max: 0.35
   beta: 2.0
   iterations: 3
+  # Continuous direction interpolation; no hard confidence/consensus gate.
+  direction_mode: local_excess_confidence
   z0_quantile: 0.5
 
 training:
@@ -93,6 +95,13 @@ evaluation:
   workers: 0
   # Test-only multiplier: effective refine alpha_max is 0.35 * 2.0 = 0.70.
   refine_strength_scale: 2.0
+  # Source-validation-only parameter search. The current best setting remains
+  # in the grid, and held-out test centers are evaluated only once afterward.
+  refine_tuning:
+    direction_modes: [legacy_complement, local_excess_confidence]
+    beta_values: [2.0]
+    strength_scales: [2.0]
+    dice_tolerance: 0.001
   max_metric_voxels: 200000
   calibration_bins: 15
   high_confidence_threshold: 0.95

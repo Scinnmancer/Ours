@@ -127,6 +127,7 @@ class DualHeadSwinUNETR(nn.Module):
             alpha_max=float(t_cfg.get("alpha_max", 0.35)),
             beta=float(t_cfg.get("beta", 2.0)),
             iterations=int(t_cfg.get("iterations", 3)),
+            direction_mode=str(t_cfg.get("direction_mode", "legacy_complement")),
         )
 
     def encode(self, image: torch.Tensor) -> tuple[torch.Tensor, ...]:
