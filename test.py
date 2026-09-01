@@ -18,6 +18,13 @@ from .inference import infer_volume
 from .metrics import evaluate_case
 from .model import DualHeadSwinUNETR
 from .probability import atomic_label_to_scalar
+from .refine_audit import (
+    ATOMIC_CHANGE_CODES,
+    audit_refinement,
+    probability_snapshot,
+    save_audit_nifti,
+    summarize_audits,
+)
 from .reproducibility import save_run_metadata, set_reproducibility
 
 
@@ -127,20 +134,6 @@ def _required_cpu_tensor(value: torch.Tensor | None, name: str, dtype: torch.dty
     return value.detach().to(device="cpu", dtype=dtype)
 
 
-def _atomic_prediction(probability: torch.Tensor) -> torch.Tensor:
-    return probability.argmax(dim=1)[0].to(torch.uint8)
-
-
-def _region_prediction_from_atomic(probability: torch.Tensor) -> torch.Tensor:
-    if probability.ndim != 5 or probability.shape[:2] != (1, 4):
-        raise ValueError("Atomic probability must have shape [1,4,D,H,W]")
-    atomic = probability[0]
-    tc = (atomic[1] + atomic[3]) >= 0.5
-    wt = (atomic[1] + atomic[2] + atomic[3]) >= 0.5
-    et = atomic[3] >= 0.5
-    return torch.stack((tc, wt, et)).to(torch.uint8)
-
-
 def _evaluate_batch(
     model: DualHeadSwinUNETR,
     batch: dict[str, Any],
@@ -150,21 +143,36 @@ def _evaluate_batch(
     domain: str,
     index: int,
     batch_count: int,
-) -> list[dict[str, Any]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
     evaluation = config["evaluation"]
     image = batch["image"].to(device, non_blocking=True)
     result = infer_volume(model, image, config, compute_uncertainty=True, refine=True)
     case = _case_name(batch, index)
-    affine = _affine(batch) if bool(evaluation.get("save_nifti", False)) else None
+    audit_config = evaluation.get("refine_audit", {})
+    audit_enabled = bool(audit_config.get("enabled", False))
+    audit_save_nifti = audit_enabled and bool(audit_config.get("save_nifti", False))
+    affine = (
+        _affine(batch)
+        if bool(evaluation.get("save_nifti", False)) or audit_save_nifti
+        else None
+    )
 
     # Evaluate base before transferring refined probabilities. This prevents
     # two full four-channel volumes from residing in host memory together.
     base_region_prediction = _required_cpu_tensor(
         result.base_region_probability >= 0.5, "base region prediction", torch.uint8
     )[0]
-    base_atomic_probability = _required_cpu_tensor(result.base_atomic_probability, "base atomic probability")
+    base_atomic_probability = _required_cpu_tensor(
+        result.base_atomic_probability, "base atomic probability"
+    )
+    base_snapshot = probability_snapshot(base_atomic_probability)
     uncertainty = _required_cpu_tensor(result.uncertainty, "uncertainty")
-    base_atomic_prediction = _atomic_prediction(base_atomic_probability)
+    base_atomic_prediction = base_snapshot.atomic_prediction
     refined_atomic_device = result.refined_atomic_probability
     if refined_atomic_device is None:
         raise RuntimeError("Evaluation output is missing refined atomic probability")
@@ -196,10 +204,13 @@ def _evaluate_batch(
     )
     del base_atomic_probability, base_region_prediction, base_metrics
 
-    refined_atomic_probability = _required_cpu_tensor(refined_atomic_device, "refined atomic probability")
+    refined_atomic_probability = _required_cpu_tensor(
+        refined_atomic_device, "refined atomic probability"
+    )
     del refined_atomic_device
-    refined_atomic_prediction = _atomic_prediction(refined_atomic_probability)
-    refined_region_prediction = _region_prediction_from_atomic(refined_atomic_probability)
+    refined_snapshot = probability_snapshot(refined_atomic_probability)
+    refined_atomic_prediction = refined_snapshot.atomic_prediction
+    refined_region_prediction = refined_snapshot.region_prediction
     if device.type == "cuda" and bool(evaluation.get("release_cuda_cache", True)):
         torch.cuda.empty_cache()
     refined_metrics = evaluate_case(
@@ -211,7 +222,9 @@ def _evaluate_batch(
         risk_reference_prediction=base_atomic_prediction,
         **metric_options,
     )
-    case_rows.append({"domain": domain, "prediction": "refined", "case": case, **refined_metrics})
+    case_rows.append(
+        {"domain": domain, "prediction": "refined", "case": case, **refined_metrics}
+    )
     print(
         f"{domain} {index + 1}/{batch_count} {case} "
         f"refined dice={refined_metrics['mean_dice']:.4f} "
@@ -222,7 +235,22 @@ def _evaluate_batch(
         prediction_dir = output / "nifti" / domain
         prediction_dir.mkdir(parents=True, exist_ok=True)
         nib.save(nib.Nifti1Image(scalar, affine), prediction_dir / f"{case}.nii.gz")
-    return case_rows
+    audit_rows: list[dict[str, Any]] = []
+    atomic_transition_rows: list[dict[str, Any]] = []
+    region_transition_rows: list[dict[str, Any]] = []
+    if audit_enabled:
+        audit = audit_refinement(base_snapshot, refined_snapshot, batch["label_scalar"])
+        audit_rows.append({"domain": domain, "case": case, **audit.metrics})
+        atomic_transition_rows.extend(
+            {"domain": domain, "case": case, **row} for row in audit.atomic_transitions
+        )
+        region_transition_rows.extend(
+            {"domain": domain, "case": case, **row} for row in audit.region_transitions
+        )
+        if audit_save_nifti:
+            audit_dir = output / "refine_audit_maps" / domain
+            save_audit_nifti(audit, affine, audit_dir, case)
+    return case_rows, audit_rows, atomic_transition_rows, region_transition_rows
 
 
 @torch.inference_mode()
@@ -250,6 +278,10 @@ def run_evaluation(config: dict[str, Any], checkpoint: str, output_dir: str | No
                 "epoch": payload.get("epoch"),
                 "uncertainty_source": "zernike_disagreement",
                 "evaluation_calibration_metric": "basic_ece",
+                "refine_audit_enabled": bool(
+                    config["evaluation"].get("refine_audit", {}).get("enabled", False)
+                ),
+                "refine_audit_change_codes": ATOMIC_CHANGE_CODES,
                 **refinement,
             },
             stream,
@@ -257,24 +289,34 @@ def run_evaluation(config: dict[str, Any], checkpoint: str, output_dir: str | No
         )
     del payload
     rows: list[dict[str, Any]] = []
+    audit_rows: list[dict[str, Any]] = []
+    atomic_transition_rows: list[dict[str, Any]] = []
+    region_transition_rows: list[dict[str, Any]] = []
     evaluation = config["evaluation"]
     for split in evaluation["splits"]:
         domain = "source_val" if split == "val" else split.removeprefix("test_")
         loader = build_loader(config, split, "test")
         for index, batch in enumerate(loader):
             try:
-                rows.extend(
-                    _evaluate_batch(
-                        model,
-                        batch,
-                        device,
-                        config,
-                        output,
-                        domain,
-                        index,
-                        len(loader),
-                    )
+                (
+                    batch_rows,
+                    batch_audits,
+                    batch_atomic_transitions,
+                    batch_region_transitions,
+                ) = _evaluate_batch(
+                    model,
+                    batch,
+                    device,
+                    config,
+                    output,
+                    domain,
+                    index,
+                    len(loader),
                 )
+                rows.extend(batch_rows)
+                audit_rows.extend(batch_audits)
+                atomic_transition_rows.extend(batch_atomic_transitions)
+                region_transition_rows.extend(batch_region_transitions)
             finally:
                 del batch
                 if device.type == "cuda" and bool(evaluation.get("release_cuda_cache", True)):
@@ -284,6 +326,14 @@ def run_evaluation(config: dict[str, Any], checkpoint: str, output_dir: str | No
     _write_csv(output / "summary_metrics.csv", summary)
     with (output / "summary_metrics.json").open("w") as stream:
         json.dump(summary, stream, indent=2, allow_nan=True)
+    if audit_rows:
+        audit_summary = summarize_audits(audit_rows)
+        _write_csv(output / "refine_audit_case.csv", audit_rows)
+        _write_csv(output / "refine_audit_summary.csv", audit_summary)
+        _write_csv(output / "refine_atomic_transitions.csv", atomic_transition_rows)
+        _write_csv(output / "refine_region_transitions.csv", region_transition_rows)
+        with (output / "refine_audit_summary.json").open("w") as stream:
+            json.dump(audit_summary, stream, indent=2, allow_nan=False)
     return output
 
 

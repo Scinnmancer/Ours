@@ -63,8 +63,8 @@ label_transfer:
   sigma: 1.0
   gamma: 2.0
   alpha_max: 0.35
-  beta: 2.0
-  iterations: 3
+  beta: 1.75
+  iterations: 4
   z0_quantile: 0.5
 
 training:
@@ -91,17 +91,11 @@ training:
 evaluation:
   splits: [val, test_CBICA, test_2013, test_TMC]
   workers: 0
-  # Historical best complement-refine setting: 0.35 * 2.6 = 0.91.
-  refine_strength_scale: 2.6
-  # Complement-refine validation search. The network is inferred once per source
-  # case; all iteration/beta/strength combinations reuse the same base outputs.
-  refine_tuning:
-    iteration_values: [1, 2, 3, 4, 5]
-    beta_values: [1.75, 2.0, 2.25]
-    strength_scales: [2.4, 2.5, 2.6, 2.7, 2.8]
-    dice_tolerance: 0.0
-    fallback_dice_tolerance: 0.0001
-    ece_tie_tolerance: 0.0002
+  # Source-validation optimum for complement-neighbor refine: 0.35 * 2.8 = 0.98.
+  refine_strength_scale: 2.8
+  refine_audit:
+    enabled: true
+    save_nifti: true
   max_metric_voxels: 200000
   calibration_bins: 15
   high_confidence_threshold: 0.95

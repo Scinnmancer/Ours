@@ -115,42 +115,35 @@ passing the configured Dice tolerance. Equal ECE keeps the earlier checkpoint;
 Risk ECE, Risk Brier, and Dice do not break ties. A run with no Dice-eligible
 checkpoint fails without relabeling `last_calibration.pt` as a best model.
 
-Standalone evaluation strengthens refinement only at test time with
-`evaluation.refine_strength_scale` (default `2.6`, the historical best for the
-complement-neighbor formula). With the default
-`label_transfer.alpha_max=0.35`, the effective update ceiling is `0.91`. The
+Standalone evaluation uses the fixed source-validation optimum for the
+complement-neighbor formula: `iterations=4`, `beta=1.75`, and
+`evaluation.refine_strength_scale=2.8`. With the default
+`label_transfer.alpha_max=0.35`, the effective update ceiling is `0.98`. The
 base value, multiplier, and effective value are saved in
 `checkpoint_metadata.json`; calibration, Z0 fitting, and checkpoint parameters
 are unchanged.
 
-Refine-only parameter tuning is available as a one-click evaluation for the
-checked-in complement-neighbor formula `alternative ∝ (1-p) * neighbor`. It
-searches the configured `iteration_values`, `beta_values`, and
-`strength_scales` on `source_val`. A strict no-Dice-degradation guardrail is
-used first, with the configured small fallback tolerance only when no strict
-candidate is eligible. Ordinary ECE selects the winner; ECE differences within
-`ece_tie_tolerance` prefer higher Dice. The expensive network and geometric
-uncertainty inference runs once per validation case; all candidates reuse those
-base outputs and differ only in label-transfer parameters. The selected setting
-is then evaluated once on all configured splits:
+The fixed setting was selected from 75 candidates on `source_val` by ordinary
+ECE after a strict no-Dice-degradation guardrail. The external-center results
+were not used for parameter selection. Run the final base/refined evaluation
+directly:
 
 ```bash
 cd /path/to/parent-containing-ours
-CHECKPOINT=ours/runs/dual_swin_zernike_brats2020/final.pt \
-  bash ours/run_refine_tuning.sh
+python -m ours.test \
+  --config ours/configs/brats2020.yaml \
+  --checkpoint ours/runs/dual_swin_zernike_brats2020/final.pt \
+  --output ours/runs/dual_swin_zernike_brats2020/evaluation
 ```
 
-Set `OUTPUT`, `CONFIG`, or `PYTHON_BIN` as environment variables when needed.
-Pass `--skip-final` to search without the final multi-center test and `--force`
-to ignore reusable completed results. The default search uses 75 combinations:
-`iterations=[1,2,3,4,5]`, `beta=[1.75,2.0,2.25]`, and strength scale
-`[2.4,2.5,2.6,2.7,2.8]`. No training or calibration stage is invoked. The
-formula identifier and every selected parameter are stored in the run metadata.
-Results are written to the fresh `refine_tuning_complement_v1/` directory by
-default, including `candidates.csv`, `selection.json`, per-candidate source
-validation directories, `final__<selected-parameters>/`, and
-`refine_tuning.log`. Using a new output root prevents reuse of results produced
-by incompatible refine formulas.
+The test-time refine audit is enabled by default. In addition to the existing
+base/refined metrics, it writes per-case and aggregate correction statistics,
+atomic and region transition tables, and NIfTI maps under
+`refine_audit_maps/`. Change maps use `0=outside ROI`, `1=unchanged`,
+`2=corrected`, `3=corrupted`, and `4=wrong-to-wrong` (atomic only). Confidence
+delta maps store `refined max probability - base max probability`. Set
+`evaluation.refine_audit.save_nifti=false` to keep the tables without spatial
+maps.
 
 If the configured split JSON is absent, the training entry point generates the
 deterministic center-based splits before constructing data loaders. Run
@@ -163,8 +156,10 @@ Training stores the resolved configuration, environment metadata, baseline
 encoder loading report, checkpoints, fitted Zernike statistics,
 segmentation-weight hashes, and validation metrics under
 `ours/runs/<experiment>/`. Evaluation writes case-level and domain-level
-CSV/JSON for both the base and refined predictions and can optionally save NIfTI
-segmentations by setting `evaluation.save_nifti=true`.
+CSV/JSON for both the base and refined predictions. The refine audit additionally
+writes `refine_audit_case.csv`, `refine_audit_summary.csv/json`, atomic and
+TC/WT/ET transition tables, and spatial NIfTI change maps. Final refined
+segmentations remain optional through `evaluation.save_nifti=true`.
 
 Warm-up runs for 150 epochs by default. Calibration validation saves voxelwise
 uncertainty snapshots every 10 epochs under

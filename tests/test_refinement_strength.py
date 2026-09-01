@@ -1,8 +1,10 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from ours.config import load_config
 from ours.test import _configure_test_time_refinement
 from ours.transfer import UncertaintyGatedLabelTransfer
 
@@ -49,6 +51,25 @@ def test_larger_test_time_scale_produces_a_stronger_refine_update():
     weak_update = (weak(base, uncertainty) - base).abs().mean()
     strong_update = (strong(base, uncertainty) - base).abs().mean()
     assert strong_update > weak_update
+
+
+def test_default_config_uses_selected_refine_parameters():
+    config = load_config(
+        Path(__import__("ours").__path__[0]) / "configs" / "brats2020.yaml"
+    )
+    transfer = UncertaintyGatedLabelTransfer(
+        alpha_max=config["label_transfer"]["alpha_max"],
+        beta=config["label_transfer"]["beta"],
+        iterations=config["label_transfer"]["iterations"],
+    )
+    metadata = _configure_test_time_refinement(
+        SimpleNamespace(label_transfer=transfer), config
+    )
+
+    assert transfer.beta == pytest.approx(1.75)
+    assert transfer.iterations == 4
+    assert metadata["refine_strength_scale"] == pytest.approx(2.8)
+    assert metadata["refine_effective_alpha_max"] == pytest.approx(0.98)
 
 
 @pytest.mark.parametrize("scale", [0.0, -1.0, 3.0])
