@@ -49,7 +49,6 @@ def _configure_test_time_refinement(
         "refine_base_alpha_max": base_alpha_max,
         "refine_strength_scale": strength_scale,
         "refine_effective_alpha_max": effective_alpha_max,
-        "refine_uncertainty_gain": float(model.label_transfer.uncertainty_gain),
     }
 
 

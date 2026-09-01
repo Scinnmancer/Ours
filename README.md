@@ -123,34 +123,6 @@ base value, multiplier, and effective value are saved in
 `checkpoint_metadata.json`; calibration, Z0 fitting, and checkpoint parameters
 are unchanged.
 
-To test whether broader refine participation improves Dice, the project also
-provides a source-validation-only constrained search. It remaps uncertainty
-inside the refine gate as `min(uncertainty_gain * u, 1)`; it does not alter the
-geometric-moment uncertainty map or any checkpoint tensor. The 36 candidates
-cover `iterations=[4,5,6]`, `beta=[0.5,0.75,1.0]`, and
-`uncertainty_gain=[1.5,1.75,2.0,2.25]`. A candidate must change 1.5–2.5% of ROI
-top-1 labels, retain positive net corrections and at least 55% correction
-precision, preserve ET within 0.0005 Dice, and pass the overall Dice guardrail.
-Among eligible candidates, selection maximizes Dice, then minimizes ordinary
-ECE, then prefers the change rate nearest 2%. External centers are evaluated
-only once after selection and never influence it. Run the complete workflow:
-
-```bash
-cd /path/to/parent-containing-ours
-bash ours/run_refine_participation_tuning.sh
-```
-
-Override `CHECKPOINT`, `CONFIG`, `OUTPUT`, or `PYTHON_BIN` as environment
-variables. Add `--skip-final` to run only source-validation selection or
-`--force` to invalidate reusable results. The selected parameters and explicit
-guardrail decision are saved in `selection.json`; all candidates are recorded
-in `candidates.csv/json`. If the grid misses the 1.5–2.5% band, the safe
-candidate nearest 2% is labeled `nearest_safe`, while
-`target_band_achieved=false` remains explicit. If no candidate satisfies the
-Dice, ET, net-correction, and precision constraints, the command exits normally
-with diagnostics, preserves the existing default refine configuration, and
-skips external evaluation.
-
 The fixed setting was selected from 75 candidates on `source_val` by ordinary
 ECE after a strict no-Dice-degradation guardrail. The external-center results
 were not used for parameter selection. Run the final base/refined evaluation

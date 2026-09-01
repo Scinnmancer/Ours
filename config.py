@@ -96,16 +96,9 @@ def validate_config(config: dict[str, Any]) -> None:
             "label_transfer.alpha_max * evaluation.refine_strength_scale must be less than 1"
         )
     beta = float(config["label_transfer"].get("beta", 2.0))
-    uncertainty_gain = float(
-        config["label_transfer"].get("uncertainty_gain", 1.0)
-    )
     iterations = config["label_transfer"].get("iterations", 3)
     if not math.isfinite(beta) or beta < 0.0:
         raise ValueError("label_transfer.beta must be finite and non-negative")
-    if not math.isfinite(uncertainty_gain) or uncertainty_gain <= 0.0:
-        raise ValueError(
-            "label_transfer.uncertainty_gain must be finite and greater than 0"
-        )
     if (
         isinstance(iterations, bool)
         or float(iterations) != int(iterations)
@@ -118,35 +111,6 @@ def validate_config(config: dict[str, Any]) -> None:
     for key in ("enabled", "save_nifti"):
         if key in refine_audit and not isinstance(refine_audit[key], bool):
             raise ValueError(f"evaluation.refine_audit.{key} must be a boolean")
-    participation = config["evaluation"].get("refine_participation_tuning", {})
-    if not isinstance(participation, dict):
-        raise ValueError("evaluation.refine_participation_tuning must be a mapping")
-    if participation:
-        for key in ("iteration_values", "beta_values", "uncertainty_gain_values"):
-            values = participation.get(key, [])
-            if not isinstance(values, list) or not values:
-                raise ValueError(
-                    f"evaluation.refine_participation_tuning.{key} must be a non-empty list"
-                )
-        for value in participation["iteration_values"]:
-            if isinstance(value, bool) or float(value) != int(value) or int(value) <= 0:
-                raise ValueError("refine participation iterations must be positive integers")
-        if any(not math.isfinite(float(value)) or float(value) < 0.0 for value in participation["beta_values"]):
-            raise ValueError("refine participation beta values must be finite and non-negative")
-        if any(not math.isfinite(float(value)) or float(value) <= 0.0 for value in participation["uncertainty_gain_values"]):
-            raise ValueError("refine participation uncertainty gains must be finite and positive")
-        target = float(participation.get("target_change_rate", 0.02))
-        lower = float(participation.get("change_rate_min", 0.015))
-        upper = float(participation.get("change_rate_max", 0.025))
-        if not all(math.isfinite(value) for value in (target, lower, upper)) or not 0.0 <= lower <= target <= upper <= 1.0:
-            raise ValueError("refine participation change-rate bounds must satisfy 0 <= min <= target <= max <= 1")
-        precision = float(participation.get("min_correction_precision", 0.55))
-        if not math.isfinite(precision) or not 0.0 <= precision <= 1.0:
-            raise ValueError("refine participation minimum correction precision must be in [0, 1]")
-        for key, default in (("max_et_dice_drop", 0.0005), ("dice_tolerance", 0.0), ("fallback_dice_tolerance", 0.0001)):
-            value = float(participation.get(key, default))
-            if not math.isfinite(value) or value < 0.0:
-                raise ValueError(f"refine participation {key} must be finite and non-negative")
     for key in ("warmup_epochs", "calibration_epochs", "validation_every"):
         if int(config["training"].get(key, 0)) <= 0:
             raise ValueError(f"training.{key} must be a positive integer")

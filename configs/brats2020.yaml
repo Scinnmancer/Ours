@@ -64,8 +64,6 @@ label_transfer:
   gamma: 2.0
   alpha_max: 0.35
   beta: 1.75
-  # Refine-only remapping; 1.0 exactly preserves the current validated baseline.
-  uncertainty_gain: 1.0
   iterations: 4
   z0_quantile: 0.5
 
@@ -98,18 +96,6 @@ evaluation:
   refine_audit:
     enabled: true
     save_nifti: true
-  # Source-validation-only search for roughly 2% atomic top-1 participation.
-  refine_participation_tuning:
-    target_change_rate: 0.02
-    change_rate_min: 0.015
-    change_rate_max: 0.025
-    iteration_values: [4, 5, 6]
-    beta_values: [0.5, 0.75, 1.0]
-    uncertainty_gain_values: [1.5, 1.75, 2.0, 2.25]
-    min_correction_precision: 0.55
-    max_et_dice_drop: 0.0005
-    dice_tolerance: 0.0
-    fallback_dice_tolerance: 0.0001
   max_metric_voxels: 200000
   calibration_bins: 15
   high_confidence_threshold: 0.95
