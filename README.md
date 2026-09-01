@@ -144,8 +144,12 @@ Override `CHECKPOINT`, `CONFIG`, `OUTPUT`, or `PYTHON_BIN` as environment
 variables. Add `--skip-final` to run only source-validation selection or
 `--force` to invalidate reusable results. The selected parameters and explicit
 guardrail decision are saved in `selection.json`; all candidates are recorded
-in `candidates.csv/json`. If no candidate passes, the command stops without
-running or reporting an external-center final result.
+in `candidates.csv/json`. If the grid misses the 1.5–2.5% band, the safe
+candidate nearest 2% is labeled `nearest_safe`, while
+`target_band_achieved=false` remains explicit. If no candidate satisfies the
+Dice, ET, net-correction, and precision constraints, the command exits normally
+with diagnostics, preserves the existing default refine configuration, and
+skips external evaluation.
 
 The fixed setting was selected from 75 candidates on `source_val` by ordinary
 ECE after a strict no-Dice-degradation guardrail. The external-center results

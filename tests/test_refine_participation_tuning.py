@@ -78,3 +78,34 @@ def test_fallback_allows_only_configured_tiny_dice_drop():
 
     assert best is candidate
     assert tier == "fallback"
+
+
+def test_nearest_safe_tier_handles_a_grid_that_misses_target_band():
+    config = load_config(
+        Path(__import__("ours").__path__[0]) / "configs" / "brats2020.yaml"
+    )
+    tuning = config["evaluation"]["refine_participation_tuning"]
+    far = _candidate(name="far", atomic_change_rate=0.006)
+    near = _candidate(name="near", atomic_change_rate=0.012, basic_ece=0.13)
+
+    best, tier = select_with_guardrails([far, near], tuning)
+
+    assert best is near
+    assert tier == "nearest_safe"
+
+
+def test_no_safe_candidate_returns_diagnostics_instead_of_selecting():
+    config = load_config(
+        Path(__import__("ours").__path__[0]) / "configs" / "brats2020.yaml"
+    )
+    tuning = config["evaluation"]["refine_participation_tuning"]
+    unsafe = _candidate(
+        atomic_change_rate=0.03,
+        atomic_corrected_voxels=10,
+        atomic_corrupted_voxels=20,
+    )
+
+    best, tier = select_with_guardrails([unsafe], tuning)
+
+    assert best is None
+    assert tier is None

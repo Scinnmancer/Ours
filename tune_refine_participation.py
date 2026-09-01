@@ -80,6 +80,7 @@ def _eligible(
     change_rate_max: float,
     min_correction_precision: float,
     max_et_dice_drop: float,
+    enforce_change_band: bool = True,
 ) -> bool:
     if not _finite(
         candidate,
@@ -93,9 +94,12 @@ def _eligible(
     ):
         return False
     return bool(
-        change_rate_min
-        <= float(candidate["atomic_change_rate"])
-        <= change_rate_max
+        (
+            not enforce_change_band
+            or change_rate_min
+            <= float(candidate["atomic_change_rate"])
+            <= change_rate_max
+        )
         and int(candidate["atomic_corrected_voxels"])
         > int(candidate["atomic_corrupted_voxels"])
         and float(candidate["atomic_correction_precision"])
@@ -116,6 +120,8 @@ def select_candidate(
     min_correction_precision: float = 0.55,
     max_et_dice_drop: float = 0.0005,
     dice_tolerance: float = 0.0,
+    enforce_change_band: bool = True,
+    target_first: bool = False,
 ) -> dict[str, Any] | None:
     """Apply safety constraints, then prefer Dice, ECE, and target proximity."""
     eligible: list[tuple[int, dict[str, Any]]] = []
@@ -127,20 +133,23 @@ def select_candidate(
             change_rate_max=change_rate_max,
             min_correction_precision=min_correction_precision,
             max_et_dice_drop=max_et_dice_drop,
+            enforce_change_band=enforce_change_band,
         )
         if candidate["eligible"]:
             eligible.append((index, candidate))
     if not eligible:
         return None
-    return min(
-        eligible,
-        key=lambda item: (
+    def ranking(item: tuple[int, dict[str, Any]]) -> tuple[float, ...]:
+        distance = abs(float(item[1]["atomic_change_rate"]) - target_change_rate)
+        quality = (
             -float(item[1]["mean_dice"]),
             float(item[1]["basic_ece"]),
-            abs(float(item[1]["atomic_change_rate"]) - target_change_rate),
-            item[0],
-        ),
-    )[1]
+        )
+        if target_first:
+            return distance, *quality, float(item[0])
+        return *quality, distance, float(item[0])
+
+    return min(eligible, key=ranking)[1]
 
 
 def select_with_guardrails(
@@ -166,6 +175,17 @@ def select_with_guardrails(
         best = select_candidate(candidates, dice_tolerance=fallback, **common)
         if best is not None:
             return best, "fallback"
+    # Missing the desired rate band must not discard an otherwise safe sweep.
+    # Keep all quality constraints and choose the safe rate nearest the target.
+    best = select_candidate(
+        candidates,
+        dice_tolerance=max(strict_tolerance, fallback),
+        enforce_change_band=False,
+        target_first=True,
+        **common,
+    )
+    if best is not None:
+        return best, "nearest_safe"
     return None, None
 
 
@@ -519,6 +539,12 @@ def run_tuning(
             "ET/Dice guardrails; then maximum Dice, minimum ECE, nearest 2% rate"
         ),
         "selection_tier": tier,
+        "target_band_achieved": bool(
+            best is not None
+            and float(tuning.get("change_rate_min", 0.015))
+            <= float(best["atomic_change_rate"])
+            <= float(tuning.get("change_rate_max", 0.025))
+        ),
         "target_change_rate": float(tuning.get("target_change_rate", 0.02)),
         "guardrails": {
             key: tuning.get(key)
@@ -540,10 +566,13 @@ def run_tuning(
     selection_path = output / "selection.json"
     _json(selection_path, selection)
     if best is None:
-        raise RuntimeError(
-            "No candidate met the participation and safety guardrails; "
-            f"inspect {selection_path}. External evaluation was not run."
+        print(
+            "[participation-tuning] no candidate met the safety guardrails; "
+            f"diagnostics were saved to {selection_path}. The existing default "
+            "refine configuration remains unchanged and external evaluation was not run.",
+            flush=True,
         )
+        return output
 
     print(
         "[participation-tuning] selected "
