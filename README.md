@@ -116,16 +116,20 @@ Risk ECE, Risk Brier, and Dice do not break ties. A run with no Dice-eligible
 checkpoint fails without relabeling `last_calibration.pt` as a best model.
 
 Standalone evaluation strengthens refinement only at test time with
-`evaluation.refine_strength_scale` (default `2.0`). With the default
-`label_transfer.alpha_max=0.35`, the effective update ceiling is `0.70`. The
+`evaluation.refine_strength_scale` (default `2.6`, the historical best for the
+complement-neighbor formula). With the default
+`label_transfer.alpha_max=0.35`, the effective update ceiling is `0.91`. The
 base value, multiplier, and effective value are saved in
 `checkpoint_metadata.json`; calibration, Z0 fitting, and checkpoint parameters
 are unchanged.
 
-Refine-only parameter tuning is available as a one-click evaluation. It searches
-the configured `evaluation.refine_tuning.beta_values` and `strength_scales` on
-`source_val`, applies the Dice guardrail, and selects the lowest ordinary ECE
-(higher Dice breaks an exactly equal ECE). The expensive network and geometric
+Refine-only parameter tuning is available as a one-click evaluation for the
+checked-in complement-neighbor formula `alternative ∝ (1-p) * neighbor`. It
+searches the configured `iteration_values`, `beta_values`, and
+`strength_scales` on `source_val`. A strict no-Dice-degradation guardrail is
+used first, with the configured small fallback tolerance only when no strict
+candidate is eligible. Ordinary ECE selects the winner; ECE differences within
+`ece_tie_tolerance` prefer higher Dice. The expensive network and geometric
 uncertainty inference runs once per validation case; all candidates reuse those
 base outputs and differ only in label-transfer parameters. The selected setting
 is then evaluated once on all configured splits:
@@ -138,13 +142,15 @@ CHECKPOINT=ours/runs/dual_swin_zernike_brats2020/final.pt \
 
 Set `OUTPUT`, `CONFIG`, or `PYTHON_BIN` as environment variables when needed.
 Pass `--skip-final` to search without the final multi-center test and `--force`
-to ignore reusable completed results. The default search uses 16 combinations
-of `beta=[2.0,2.5,3.0,3.5]` and strength scale
-`[2.0,2.25,2.4,2.6]`; `iterations` remains 3 and no training or calibration
-stage is invoked. Results are written to `refine_tuning/candidates.csv`,
-`selection.json`, per-candidate source-validation directories, and
-`final__<selected-parameters>/`; console output is also saved as
-`refine_tuning.log`.
+to ignore reusable completed results. The default search uses 75 combinations:
+`iterations=[1,2,3,4,5]`, `beta=[1.75,2.0,2.25]`, and strength scale
+`[2.4,2.5,2.6,2.7,2.8]`. No training or calibration stage is invoked. The
+formula identifier and every selected parameter are stored in the run metadata.
+Results are written to the fresh `refine_tuning_complement_v1/` directory by
+default, including `candidates.csv`, `selection.json`, per-candidate source
+validation directories, `final__<selected-parameters>/`, and
+`refine_tuning.log`. Using a new output root prevents reuse of results produced
+by incompatible refine formulas.
 
 If the configured split JSON is absent, the training entry point generates the
 deterministic center-based splits before constructing data loaders. Run

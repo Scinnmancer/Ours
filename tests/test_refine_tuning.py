@@ -12,6 +12,7 @@ from ours.tune_refine import (
     build_candidates,
     run_tuning,
     select_candidate,
+    select_with_guardrails,
 )
 
 
@@ -29,13 +30,21 @@ def test_default_refine_grid_contains_recommended_high_uncertainty_setting():
     config = load_config(config_path)
     candidates = build_candidates(config)
 
-    assert len(candidates) == 16
+    assert len(candidates) == 75
     assert any(
-        candidate["beta"] == 3.0
-        and candidate["refine_strength_scale"] == 2.4
-        and candidate["effective_alpha_max"] == pytest.approx(0.84)
+        candidate["iterations"] == 3
+        and candidate["beta"] == 2.0
+        and candidate["refine_strength_scale"] == 2.6
+        and candidate["effective_alpha_max"] == pytest.approx(0.91)
         for candidate in candidates
     )
+    assert {candidate["iterations"] for candidate in candidates} == {
+        1,
+        2,
+        3,
+        4,
+        5,
+    }
     assert all(float(candidate["effective_alpha_max"]) < 1.0 for candidate in candidates)
 
 
@@ -52,12 +61,50 @@ def test_selection_minimizes_ece_after_dice_guardrail():
     assert candidates[1]["eligible"] is True
 
 
-def test_selection_uses_higher_dice_only_for_equal_ece():
+def test_selection_uses_higher_dice_only_within_ece_tolerance():
     candidates = [
         _candidate("earlier", 0.08, 0.83),
-        _candidate("higher-dice", 0.08, 0.84),
+        _candidate("higher-dice", 0.0801, 0.84),
     ]
-    assert select_candidate(candidates, dice_tolerance=0.0002) is candidates[1]
+    assert (
+        select_candidate(
+            candidates,
+            dice_tolerance=0.0002,
+            ece_tie_tolerance=0.0002,
+        )
+        is candidates[1]
+    )
+
+
+def test_selection_keeps_materially_lower_ece_despite_higher_dice():
+    candidates = [
+        _candidate("lower-ece", 0.08, 0.83),
+        _candidate("higher-dice", 0.0803, 0.84),
+    ]
+    assert (
+        select_candidate(
+            candidates,
+            dice_tolerance=0.0002,
+            ece_tie_tolerance=0.0002,
+        )
+        is candidates[0]
+    )
+
+
+def test_selection_uses_small_fallback_only_when_strict_guardrail_is_empty():
+    candidates = [
+        _candidate("fallback", 0.08, 0.82995),
+        _candidate("ineligible", 0.07, 0.8298),
+    ]
+    best, tier = select_with_guardrails(
+        candidates,
+        dice_tolerance=0.0,
+        fallback_dice_tolerance=0.0001,
+        ece_tie_tolerance=0.0002,
+    )
+
+    assert best is candidates[0]
+    assert tier == "fallback"
 
 
 def test_fast_source_selection_matches_full_dice_and_ece():
@@ -105,8 +152,9 @@ def test_one_click_tuning_runs_source_sweep_then_final_once(tmp_path, monkeypatc
             candidate_output = sweep_output / "source_val" / str(candidate["name"])
             candidate_output.mkdir(parents=True, exist_ok=True)
             is_winner = (
-                candidate["beta"] == 3.0
-                and candidate["refine_strength_scale"] == 2.4
+                candidate["iterations"] == 4
+                and candidate["beta"] == 2.0
+                and candidate["refine_strength_scale"] == 2.7
             )
             rows = [
                 {
@@ -128,6 +176,7 @@ def test_one_click_tuning_runs_source_sweep_then_final_once(tmp_path, monkeypatc
         final_calls.append(
             (
                 config["label_transfer"]["beta"],
+                config["label_transfer"]["iterations"],
                 config["evaluation"]["refine_strength_scale"],
             )
         )
@@ -144,7 +193,10 @@ def test_one_click_tuning_runs_source_sweep_then_final_once(tmp_path, monkeypatc
     run_tuning(str(config_path), str(checkpoint), str(output))
 
     selection = json.loads((output / "selection.json").read_text())
-    assert selection["best"]["beta"] == 3.0
-    assert selection["best"]["refine_strength_scale"] == 2.4
-    assert final_calls == [(3.0, 2.4)]
+    assert selection["refine_formula"] == "complement_neighbor_v1"
+    assert selection["selection_tier"] == "strict"
+    assert selection["best"]["iterations"] == 4
+    assert selection["best"]["beta"] == 2.0
+    assert selection["best"]["refine_strength_scale"] == 2.7
+    assert final_calls == [(2.0, 4, 2.7)]
     assert (output / "candidates.csv").is_file()

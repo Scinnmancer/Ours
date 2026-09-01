@@ -35,46 +35,56 @@ from .test import (
 
 
 _SWEEP_SIGNATURE = "refine_sweep_input.json"
-_SWEEP_VERSION = 1
+_SWEEP_VERSION = 2
+_REFINE_FORMULA = "complement_neighbor_v1"
 
 
-def candidate_name(beta: float, strength_scale: float) -> str:
+def candidate_name(iterations: int, beta: float, strength_scale: float) -> str:
     beta_text = f"{beta:g}".replace(".", "p")
     scale_text = f"{strength_scale:g}".replace(".", "p")
-    return f"beta_{beta_text}__scale_{scale_text}"
+    return f"iter_{iterations}__beta_{beta_text}__scale_{scale_text}"
 
 
 def build_candidates(config: dict[str, Any]) -> list[dict[str, float | str]]:
     tuning = config["evaluation"].get("refine_tuning", {})
-    beta_values = [float(value) for value in tuning.get("beta_values", [2.0, 2.5, 3.0, 3.5])]
+    iteration_values = [
+        int(value) for value in tuning.get("iteration_values", [1, 2, 3, 4, 5])
+    ]
+    beta_values = [
+        float(value) for value in tuning.get("beta_values", [1.75, 2.0, 2.25])
+    ]
     strength_scales = [
         float(value)
-        for value in tuning.get("strength_scales", [2.0, 2.25, 2.4, 2.6])
+        for value in tuning.get("strength_scales", [2.4, 2.5, 2.6, 2.7, 2.8])
     ]
     alpha_max = float(config["label_transfer"].get("alpha_max", 0.35))
     candidates: list[dict[str, float | str]] = []
-    seen: set[tuple[float, float]] = set()
-    for beta in beta_values:
-        for strength_scale in strength_scales:
-            key = (beta, strength_scale)
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append(
-                {
-                    "name": candidate_name(beta, strength_scale),
-                    "beta": beta,
-                    "refine_strength_scale": strength_scale,
-                    "effective_alpha_max": alpha_max * strength_scale,
-                }
-            )
+    seen: set[tuple[int, float, float]] = set()
+    for iterations in iteration_values:
+        for beta in beta_values:
+            for strength_scale in strength_scales:
+                key = (iterations, beta, strength_scale)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(
+                    {
+                        "name": candidate_name(iterations, beta, strength_scale),
+                        "iterations": iterations,
+                        "beta": beta,
+                        "refine_strength_scale": strength_scale,
+                        "effective_alpha_max": alpha_max * strength_scale,
+                    }
+                )
     return candidates
 
 
 def select_candidate(
-    candidates: list[dict[str, Any]], dice_tolerance: float
+    candidates: list[dict[str, Any]],
+    dice_tolerance: float,
+    ece_tie_tolerance: float = 0.0002,
 ) -> dict[str, Any] | None:
-    """Minimize ordinary ECE after a Dice guardrail; use Dice only on equal ECE."""
+    """Minimize ECE after a Dice guardrail; near-tied ECE prefers higher Dice."""
     best: dict[str, Any] | None = None
     for candidate in candidates:
         base_dice = float(candidate["base_mean_dice"])
@@ -94,9 +104,29 @@ def select_candidate(
             continue
         best_ece = float(best["basic_ece"])
         best_dice = float(best["mean_dice"])
-        if ece < best_ece or (ece == best_ece and refined_dice > best_dice):
+        if ece < best_ece - ece_tie_tolerance:
+            best = candidate
+        elif abs(ece - best_ece) <= ece_tie_tolerance and refined_dice > best_dice:
             best = candidate
     return best
+
+
+def select_with_guardrails(
+    candidates: list[dict[str, Any]],
+    dice_tolerance: float,
+    fallback_dice_tolerance: float,
+    ece_tie_tolerance: float,
+) -> tuple[dict[str, Any] | None, str | None]:
+    best = select_candidate(candidates, dice_tolerance, ece_tie_tolerance)
+    if best is not None:
+        return best, "strict"
+    if fallback_dice_tolerance > dice_tolerance:
+        best = select_candidate(
+            candidates, fallback_dice_tolerance, ece_tie_tolerance
+        )
+        if best is not None:
+            return best, "fallback"
+    return None, None
 
 
 def _evaluate_selection_case(
@@ -174,13 +204,14 @@ def _write_candidate_result(
         candidate_output / "refine_metadata.json",
         {
             "checkpoint": str(Path(checkpoint).resolve()),
+            "refine_formula": _REFINE_FORMULA,
             "selection_split": "source_val",
             "selection_metric": "basic_ece",
+            "iterations": candidate["iterations"],
             "beta": candidate["beta"],
             "refine_strength_scale": candidate["refine_strength_scale"],
             "base_alpha_max": float(config["label_transfer"].get("alpha_max", 0.35)),
             "effective_alpha_max": candidate["effective_alpha_max"],
-            "iterations": int(config["label_transfer"].get("iterations", 3)),
         },
     )
 
@@ -209,6 +240,8 @@ def run_source_sweep(
     del payload
 
     base_alpha_max = float(model.label_transfer.alpha_max)
+    base_beta = float(model.label_transfer.beta)
+    base_iterations = int(model.label_transfer.iterations)
     evaluation = config["evaluation"]
     bins = int(evaluation.get("calibration_bins", 15))
     max_voxels = int(evaluation.get("max_metric_voxels", 200000))
@@ -257,6 +290,7 @@ def run_source_sweep(
 
         for candidate in candidates:
             name = str(candidate["name"])
+            model.label_transfer.iterations = int(candidate["iterations"])
             model.label_transfer.beta = float(candidate["beta"])
             model.label_transfer.alpha_max = (
                 base_alpha_max * float(candidate["refine_strength_scale"])
@@ -300,6 +334,8 @@ def run_source_sweep(
             torch.cuda.empty_cache()
 
     model.label_transfer.alpha_max = base_alpha_max
+    model.label_transfer.beta = base_beta
+    model.label_transfer.iterations = base_iterations
     for candidate in candidates:
         _write_candidate_result(
             output,
@@ -357,12 +393,14 @@ def _run_signature(
     checkpoint_stat = checkpoint_path.stat()
     payload = {
         "version": _SWEEP_VERSION,
+        "refine_formula": _REFINE_FORMULA,
         "config": config,
         "candidates": candidates,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return {
         "version": _SWEEP_VERSION,
+        "refine_formula": _REFINE_FORMULA,
         "checkpoint": str(checkpoint_path),
         "checkpoint_size": checkpoint_stat.st_size,
         "checkpoint_mtime_ns": checkpoint_stat.st_mtime_ns,
@@ -400,6 +438,7 @@ def _can_reuse_sweep(
 def _write_candidates_csv(path: Path, candidates: list[dict[str, Any]]) -> None:
     fieldnames = [
         "name",
+        "iterations",
         "beta",
         "refine_strength_scale",
         "effective_alpha_max",
@@ -410,6 +449,7 @@ def _write_candidates_csv(path: Path, candidates: list[dict[str, Any]]) -> None:
         "delta_mean_dice",
         "delta_basic_ece",
         "eligible",
+        "selection_tier",
         "output",
     ]
     with path.open("w", newline="") as stream:
@@ -432,7 +472,11 @@ def run_tuning(
     config = load_config(config_path)
     candidates = build_candidates(config)
     tuning = config["evaluation"].get("refine_tuning", {})
-    dice_tolerance = float(tuning.get("dice_tolerance", 0.0002))
+    dice_tolerance = float(tuning.get("dice_tolerance", 0.0))
+    fallback_dice_tolerance = float(
+        tuning.get("fallback_dice_tolerance", 0.0001)
+    )
+    ece_tie_tolerance = float(tuning.get("ece_tie_tolerance", 0.0002))
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     save_run_metadata(output, config)
@@ -450,15 +494,31 @@ def run_tuning(
         _write_json(output / _SWEEP_SIGNATURE, signature)
 
     collected = _collect_candidate_metrics(output, candidates)
-    best = select_candidate(collected, dice_tolerance)
+    best, selection_tier = select_with_guardrails(
+        collected,
+        dice_tolerance,
+        fallback_dice_tolerance,
+        ece_tie_tolerance,
+    )
+    for candidate in collected:
+        candidate["selection_tier"] = (
+            selection_tier if candidate is best else "not_selected"
+        )
     _write_candidates_csv(output / "candidates.csv", collected)
     _write_json(output / "candidates.json", collected, allow_nan=False)
     final_output = output / f"final__{best['name']}" if best is not None else None
     selection = {
         "selection_split": "source_val",
         "selection_metric": "basic_ece",
-        "selection_rule": "minimum basic_ece after Dice guardrail; higher Dice breaks equal ECE",
+        "selection_rule": (
+            "minimum basic_ece after Dice guardrail; ECE differences within "
+            "ece_tie_tolerance prefer higher Dice"
+        ),
+        "refine_formula": _REFINE_FORMULA,
+        "selection_tier": selection_tier,
         "dice_tolerance": dice_tolerance,
+        "fallback_dice_tolerance": fallback_dice_tolerance,
+        "ece_tie_tolerance": ece_tie_tolerance,
         "checkpoint": str(Path(checkpoint).resolve()),
         "candidates": collected,
         "best": best,
@@ -474,6 +534,7 @@ def run_tuning(
 
     print(
         "[refine-tuning] selected "
+        f"iterations={int(best['iterations'])}, "
         f"beta={float(best['beta']):g}, "
         f"scale={float(best['refine_strength_scale']):g}, "
         f"source_val ECE={float(best['basic_ece']):.6f}, "
@@ -482,6 +543,7 @@ def run_tuning(
     )
     if run_final and final_output is not None:
         final_config = copy.deepcopy(config)
+        final_config["label_transfer"]["iterations"] = int(best["iterations"])
         final_config["label_transfer"]["beta"] = float(best["beta"])
         final_config["evaluation"]["refine_strength_scale"] = float(
             best["refine_strength_scale"]
@@ -514,7 +576,7 @@ def run_tuning(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Search refine-only beta/strength parameters on source validation, "
+            "Search complement-refine iterations/beta/strength on source validation, "
             "then evaluate the selected setting once on all configured splits."
         )
     )
