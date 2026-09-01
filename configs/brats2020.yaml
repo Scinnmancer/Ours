@@ -63,8 +63,12 @@ label_transfer:
   sigma: 1.0
   gamma: 2.0
   alpha_max: 0.35
-  beta: 1.75
+  beta: 0.75
   iterations: 4
+  # Refine only the exact highest-uncertainty 20% inside the predicted tumor
+  # plus a one-voxel dilation. Ground truth is never used by this gate.
+  uncertainty_top_fraction: 0.20
+  percentile_roi_dilation: 1
   z0_quantile: 0.5
 
 training:

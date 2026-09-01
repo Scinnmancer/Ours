@@ -127,6 +127,10 @@ class DualHeadSwinUNETR(nn.Module):
             alpha_max=float(t_cfg.get("alpha_max", 0.35)),
             beta=float(t_cfg.get("beta", 2.0)),
             iterations=int(t_cfg.get("iterations", 3)),
+            uncertainty_top_fraction=float(
+                t_cfg.get("uncertainty_top_fraction", 1.0)
+            ),
+            percentile_roi_dilation=int(t_cfg.get("percentile_roi_dilation", 0)),
         )
 
     def encode(self, image: torch.Tensor) -> tuple[torch.Tensor, ...]:

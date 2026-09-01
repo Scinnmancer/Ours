@@ -97,8 +97,24 @@ def validate_config(config: dict[str, Any]) -> None:
         )
     beta = float(config["label_transfer"].get("beta", 2.0))
     iterations = config["label_transfer"].get("iterations", 3)
+    top_fraction = float(
+        config["label_transfer"].get("uncertainty_top_fraction", 1.0)
+    )
+    roi_dilation = config["label_transfer"].get("percentile_roi_dilation", 0)
     if not math.isfinite(beta) or beta < 0.0:
         raise ValueError("label_transfer.beta must be finite and non-negative")
+    if not math.isfinite(top_fraction) or not 0.0 < top_fraction <= 1.0:
+        raise ValueError(
+            "label_transfer.uncertainty_top_fraction must be in (0, 1]"
+        )
+    if (
+        isinstance(roi_dilation, bool)
+        or float(roi_dilation) != int(roi_dilation)
+        or int(roi_dilation) < 0
+    ):
+        raise ValueError(
+            "label_transfer.percentile_roi_dilation must be a non-negative integer"
+        )
     if (
         isinstance(iterations, bool)
         or float(iterations) != int(iterations)
