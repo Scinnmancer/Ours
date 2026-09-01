@@ -126,6 +126,7 @@ class DualHeadSwinUNETR(nn.Module):
             gamma=float(t_cfg.get("gamma", 2.0)),
             alpha_max=float(t_cfg.get("alpha_max", 0.35)),
             beta=float(t_cfg.get("beta", 2.0)),
+            uncertainty_gain=float(t_cfg.get("uncertainty_gain", 1.0)),
             iterations=int(t_cfg.get("iterations", 3)),
         )
 

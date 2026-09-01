@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,6 +23,7 @@ class UncertaintyGatedLabelTransfer(nn.Module):
         gamma: float = 2.0,
         alpha_max: float = 0.35,
         beta: float = 2.0,
+        uncertainty_gain: float = 1.0,
         iterations: int = 3,
         z0: float = 0.5,
         eps: float = 1e-7,
@@ -28,10 +31,13 @@ class UncertaintyGatedLabelTransfer(nn.Module):
         super().__init__()
         if not 0.0 <= alpha_max < 1.0:
             raise ValueError("alpha_max must be in [0, 1)")
+        if not math.isfinite(uncertainty_gain) or uncertainty_gain <= 0.0:
+            raise ValueError("uncertainty_gain must be finite and greater than 0")
         self.radius = int(radius)
         self.gamma = float(gamma)
         self.alpha_max = float(alpha_max)
         self.beta = float(beta)
+        self.uncertainty_gain = float(uncertainty_gain)
         self.iterations = int(iterations)
         self.eps = float(eps)
         self.register_buffer("kernel", gaussian_kernel3d(self.radius, sigma)[None, None])
@@ -55,7 +61,12 @@ class UncertaintyGatedLabelTransfer(nn.Module):
         kernel = self.kernel.to(dtype=p.dtype)
         z = F.conv3d(reliability, kernel, padding=self.radius)
         support = (z / self.z0.to(dtype=z.dtype).clamp_min(self.eps)).clamp(max=1.0)
-        alpha = self.alpha_max * uncertainty.clamp(0.0, 1.0).pow(self.beta) * support
+        # Refine-only coverage control. The geometric uncertainty itself is not
+        # changed; gain only remaps it while computing the test-time gate.
+        refine_uncertainty = (
+            self.uncertainty_gain * uncertainty.clamp(0.0, 1.0)
+        ).clamp(max=1.0)
+        alpha = self.alpha_max * refine_uncertainty.pow(self.beta) * support
         q = p
         class_kernel = kernel.expand(p.shape[1], 1, *kernel.shape[2:]).contiguous()
         for _ in range(self.iterations):
