@@ -93,9 +93,10 @@ evaluation:
   workers: 0
   # Aggressive all-voxel refine: 0.35 * 2.84 = 0.994, kept below 1 for stability.
   refine_strength_scale: 2.84
-  # Apply a wider 7x7x7 Gaussian neighborhood after strict checkpoint loading.
-  refine_neighborhood_radius: 3
-  refine_neighborhood_sigma: 1.5
+  # Use the checkpoint-compatible 5x5x5 neighborhood and sharpen reliable votes.
+  refine_neighborhood_radius: 2
+  refine_neighborhood_sigma: 1.0
+  refine_neighbor_reliability_power: 2.0
   refine_audit:
     enabled: true
     save_nifti: true

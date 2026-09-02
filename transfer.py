@@ -24,6 +24,7 @@ class UncertaintyGatedLabelTransfer(nn.Module):
         alpha_max: float = 0.35,
         beta: float = 2.0,
         iterations: int = 3,
+        neighbor_reliability_power: float = 1.0,
         z0: float = 0.5,
         eps: float = 1e-7,
     ):
@@ -36,6 +37,7 @@ class UncertaintyGatedLabelTransfer(nn.Module):
         self.alpha_max = float(alpha_max)
         self.beta = float(beta)
         self.iterations = int(iterations)
+        self.neighbor_reliability_power = float(neighbor_reliability_power)
         self.eps = float(eps)
         self.register_buffer("kernel", gaussian_kernel3d(self.radius, self.sigma)[None, None])
         self.register_buffer("z0", torch.tensor(float(z0)))
@@ -60,6 +62,12 @@ class UncertaintyGatedLabelTransfer(nn.Module):
             dtype=self.kernel.dtype,
         )[None, None].to(device=self.kernel.device)
 
+    def set_neighbor_reliability_power(self, power: float) -> None:
+        power = float(power)
+        if not math.isfinite(power) or power <= 0.0:
+            raise ValueError("neighbor reliability power must be finite and greater than 0")
+        self.neighbor_reliability_power = power
+
     def evidence(self, uncertainty: torch.Tensor) -> torch.Tensor:
         reliability = (1.0 - uncertainty.clamp(0.0, 1.0)).pow(self.gamma)
         kernel = self.kernel.to(dtype=reliability.dtype)
@@ -76,11 +84,13 @@ class UncertaintyGatedLabelTransfer(nn.Module):
         support = (z / self.z0.to(dtype=z.dtype).clamp_min(self.eps)).clamp(max=1.0)
         alpha = self.alpha_max * uncertainty.clamp(0.0, 1.0).pow(self.beta) * support
         q = p
+        neighbor_reliability = reliability.pow(self.neighbor_reliability_power)
+        neighbor_z = F.conv3d(neighbor_reliability, kernel, padding=self.radius)
         class_kernel = kernel.expand(p.shape[1], 1, *kernel.shape[2:]).contiguous()
         for _ in range(self.iterations):
-            weighted = q * reliability
+            weighted = q * neighbor_reliability
             neighbor = F.conv3d(weighted, class_kernel, padding=self.radius, groups=p.shape[1])
-            neighbor = neighbor / z.clamp_min(self.eps)
+            neighbor = neighbor / neighbor_z.clamp_min(self.eps)
             alternative = (1.0 - p) * neighbor
             alternative_sum = alternative.sum(dim=1, keepdim=True)
             alternative = torch.where(

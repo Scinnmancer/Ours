@@ -27,6 +27,7 @@ def test_test_time_refine_strength_doubles_alpha_max_without_state_change():
             "refine_effective_alpha_max": 0.70,
             "refine_neighborhood_radius": 1,
             "refine_neighborhood_sigma": 1.0,
+            "refine_neighbor_reliability_power": 1.0,
         }
     )
     for key, value in transfer.state_dict().items():
@@ -96,11 +97,43 @@ def test_default_config_uses_selected_refine_parameters():
     assert not hasattr(transfer, "selection_mask")
     assert metadata["refine_strength_scale"] == pytest.approx(2.84)
     assert metadata["refine_effective_alpha_max"] == pytest.approx(0.994)
-    assert transfer.radius == 3
-    assert transfer.sigma == pytest.approx(1.5)
-    assert tuple(transfer.kernel.shape) == (1, 1, 7, 7, 7)
-    assert metadata["refine_neighborhood_radius"] == 3
-    assert metadata["refine_neighborhood_sigma"] == pytest.approx(1.5)
+    assert transfer.radius == 2
+    assert transfer.sigma == pytest.approx(1.0)
+    assert tuple(transfer.kernel.shape) == (1, 1, 5, 5, 5)
+    assert transfer.neighbor_reliability_power == pytest.approx(2.0)
+    assert metadata["refine_neighborhood_radius"] == 2
+    assert metadata["refine_neighborhood_sigma"] == pytest.approx(1.0)
+    assert metadata["refine_neighbor_reliability_power"] == pytest.approx(2.0)
+
+
+def test_reliability_sharpening_increases_trusted_neighbor_influence():
+    base = torch.zeros(1, 4, 3, 3, 3)
+    base[:, 0] = 1.0
+    base[:, 0, 1, 1, 0] = 0.0
+    base[:, 1, 1, 1, 0] = 1.0
+    base[:, 0, 1, 1, 2] = 0.0
+    base[:, 2, 1, 1, 2] = 1.0
+    uncertainty = torch.ones(1, 1, 3, 3, 3)
+    uncertainty[:, :, 1, 1, 1] = 0.9
+    uncertainty[:, :, 1, 1, 0] = 0.1
+    uncertainty[:, :, 1, 1, 2] = 0.6
+    plain = UncertaintyGatedLabelTransfer(
+        radius=1, alpha_max=0.9, beta=0.0, iterations=1, z0=0.01
+    )
+    sharpened = UncertaintyGatedLabelTransfer(
+        radius=1,
+        alpha_max=0.9,
+        beta=0.0,
+        iterations=1,
+        neighbor_reliability_power=2.0,
+        z0=0.01,
+    )
+
+    plain_result = plain(base, uncertainty)
+    sharpened_result = sharpened(base, uncertainty)
+
+    assert sharpened_result[0, 1, 1, 1, 1] > plain_result[0, 1, 1, 1, 1]
+    assert sharpened_result[0, 2, 1, 1, 1] < plain_result[0, 2, 1, 1, 1]
 
 
 @pytest.mark.parametrize(

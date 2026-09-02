@@ -105,6 +105,13 @@ def validate_config(config: dict[str, Any]) -> None:
     refine_sigma = float(config["evaluation"].get("refine_neighborhood_sigma", 1.0))
     if not math.isfinite(refine_sigma) or refine_sigma <= 0.0:
         raise ValueError("evaluation.refine_neighborhood_sigma must be finite and positive")
+    neighbor_power = float(
+        config["evaluation"].get("refine_neighbor_reliability_power", 1.0)
+    )
+    if not math.isfinite(neighbor_power) or neighbor_power <= 0.0:
+        raise ValueError(
+            "evaluation.refine_neighbor_reliability_power must be finite and positive"
+        )
     beta = float(config["label_transfer"].get("beta", 2.0))
     iterations = config["label_transfer"].get("iterations", 3)
     if not math.isfinite(beta) or beta < 0.0:
