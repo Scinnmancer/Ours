@@ -196,8 +196,8 @@ def apply_calibration_fusion_override(
     loaded_bias = float(model.fusion.bias.detach().cpu())
     if enabled:
         model.fusion.set_xi_bias(
-            xi=float(override.get("xi", 8.0)),
-            bias=float(override.get("bias", -4.8)),
+            xi=float(override.get("xi", 4.0)),
+            bias=float(override.get("bias", -4.0)),
         )
     return {
         "enabled": enabled,
@@ -256,13 +256,13 @@ def train_epoch(
 ) -> dict[str, Any]:
     scope = calibration_scope or ("heads" if freeze_segmentation else "full")
     margin_config = config["uncertainty"].get("margin_gradient", {})
-    margin_gradient_weight = float(margin_config.get("weight", 0.01))
+    margin_gradient_weight = float(margin_config.get("weight", 0.03))
     margin_gradient_enabled = (
         stage == "calibration"
         and bool(margin_config.get("enabled", False))
         and margin_gradient_weight > 0.0
     )
-    margin_uncertainty_power = float(margin_config.get("uncertainty_power", 1.0))
+    margin_uncertainty_power = float(margin_config.get("uncertainty_power", 1.5))
     margin_value = float(margin_config.get("margin", 1.0))
     if stage == "calibration":
         # Keep the frozen encoder deterministic while enabling each decoder's
@@ -942,7 +942,7 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
         calibration_objective = (
             "geometric_uncertainty_weighted_atomic_margin"
             if bool(margin_gradient_config.get("enabled", False))
-            and float(margin_gradient_config.get("weight", 0.01)) > 0.0
+            and float(margin_gradient_config.get("weight", 0.03)) > 0.0
             else "disabled"
         )
         freeze_segmentation = False

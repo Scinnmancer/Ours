@@ -71,7 +71,7 @@ def uncertainty_weighted_margin_loss(
     atomic_probability: torch.Tensor,
     uncertainty: torch.Tensor,
     mask: torch.Tensor | None = None,
-    uncertainty_power: float = 1.0,
+    uncertainty_power: float = 1.5,
     margin: float = 1.0,
     eps: float = 1e-6,
 ) -> torch.Tensor:

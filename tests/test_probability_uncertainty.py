@@ -44,8 +44,8 @@ def _config() -> dict:
             "lambda_u": 1.0,
             "margin_gradient": {
                 "enabled": True,
-                "weight": 0.01,
-                "uncertainty_power": 1.0,
+                "weight": 0.03,
+                "uncertainty_power": 1.5,
                 "margin": 1.0,
             },
         },
@@ -161,27 +161,28 @@ def test_calibration_fusion_override_preserves_state_layout_and_sets_recommended
     config = _config()
     config["uncertainty"]["calibration_fusion"] = {
         "enabled": True,
-        "xi": 8.0,
-        "bias": -4.8,
+        "xi": 4.0,
+        "bias": -4.0,
     }
 
     metadata = apply_calibration_fusion_override(model, config)
-    disagreement = torch.tensor([0.0, 0.6, 1.0]).reshape(3, 1, 1, 1, 1)
+    disagreement = torch.tensor([0.0, 0.5, 1.0, 1.5]).reshape(4, 1, 1, 1, 1)
     uncertainty = model.fusion(disagreement).flatten()
 
     assert tuple(model.state_dict()) == state_keys
     assert metadata["enabled"] is True
-    assert metadata["effective_xi"] == pytest.approx(8.0, rel=1e-6)
-    assert metadata["effective_bias"] == pytest.approx(-4.8, rel=1e-6)
-    assert float(uncertainty[0]) == pytest.approx(0.00816, abs=1e-4)
-    assert float(uncertainty[1]) == pytest.approx(0.5, abs=1e-6)
-    assert float(uncertainty[2]) == pytest.approx(0.96083, abs=1e-4)
+    assert metadata["effective_xi"] == pytest.approx(4.0, rel=1e-6)
+    assert metadata["effective_bias"] == pytest.approx(-4.0, rel=1e-6)
+    assert float(uncertainty[0]) == pytest.approx(0.01799, abs=1e-4)
+    assert float(uncertainty[1]) == pytest.approx(0.11920, abs=1e-4)
+    assert float(uncertainty[2]) == pytest.approx(0.5, abs=1e-6)
+    assert float(uncertainty[3]) == pytest.approx(0.88080, abs=1e-4)
     assert bool(((uncertainty > 0.0) & (uncertainty < 1.0)).all())
 
 
 @pytest.mark.parametrize(
     "fusion_config",
-    [None, {"enabled": False, "xi": 8.0, "bias": -4.8}],
+    [None, {"enabled": False, "xi": 4.0, "bias": -4.0}],
 )
 def test_disabled_or_missing_calibration_fusion_preserves_checkpoint_values(
     monkeypatch,
@@ -303,7 +304,7 @@ def test_risk_brier_loss_requires_aligned_shapes():
         risk_brier_loss(torch.zeros(2), torch.zeros(1, 2))
 
 
-def test_margin_gradient_uses_roi_normalized_linear_uncertainty_and_keeps_top_class():
+def test_margin_gradient_uses_roi_normalized_focused_uncertainty_and_keeps_top_class():
     values = torch.tensor([0.90, 0.05, 0.03, 0.02]).reshape(1, 4, 1, 1, 1)
     atomic = values.expand(1, 4, 1, 1, 2).clone().requires_grad_(True)
     uncertainty = torch.tensor([0.1, 0.9]).reshape(1, 1, 1, 1, 2)
@@ -311,20 +312,20 @@ def test_margin_gradient_uses_roi_normalized_linear_uncertainty_and_keeps_top_cl
     loss = uncertainty_weighted_margin_loss(
         atomic,
         uncertainty,
-        uncertainty_power=1.0,
+        uncertainty_power=1.5,
         margin=1.0,
     )
     gradient = torch.autograd.grad(loss, atomic)[0]
     updated = atomic.detach() - 1e-4 * gradient
 
-    assert float(gradient[..., 1].norm()) > float(gradient[..., 0].norm())
+    assert float(gradient[..., 1].norm()) > 10.0 * float(gradient[..., 0].norm())
     assert bool((updated.argmax(dim=1) == values.argmax(dim=1)).all())
     assert not bool(loss.isnan())
 
     single_voxel_loss = uncertainty_weighted_margin_loss(
         values,
         torch.full((1, 1, 1, 1, 1), 0.5),
-        uncertainty_power=1.0,
+        uncertainty_power=1.5,
         margin=1.0,
     )
     torch.testing.assert_close(loss, single_voxel_loss, rtol=1e-4, atol=1e-5)
@@ -696,8 +697,8 @@ def test_epoch_zero_remains_best_when_training_ece_gets_worse(monkeypatch, tmp_p
     config = _run_config(tmp_path)
     config["uncertainty"]["calibration_fusion"] = {
         "enabled": True,
-        "xi": 8.0,
-        "bias": -4.8,
+        "xi": 4.0,
+        "bias": -4.0,
     }
     warmup = _tiny_dual_head(monkeypatch)
     warmup.fusion.set_xi_bias(0.5, -6.0)
@@ -722,8 +723,8 @@ def test_epoch_zero_remains_best_when_training_ece_gets_worse(monkeypatch, tmp_p
     assert payload["metrics"]["ece"] == pytest.approx(0.04)
     assert payload["metrics"]["epoch_0_ece"] == pytest.approx(0.04)
     assert payload["metrics"]["best_candidate_source"] == "epoch_0"
-    assert float(best_model.fusion.xi) == pytest.approx(8.0, rel=1e-6)
-    assert float(best_model.fusion.bias) == pytest.approx(-4.8, rel=1e-6)
+    assert float(best_model.fusion.xi) == pytest.approx(4.0, rel=1e-6)
+    assert float(best_model.fusion.bias) == pytest.approx(-4.0, rel=1e-6)
 
 
 def test_training_epoch_replaces_epoch_zero_only_with_lower_eligible_ece(monkeypatch, tmp_path):

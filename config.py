@@ -95,23 +95,6 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "label_transfer.alpha_max * evaluation.refine_strength_scale must be less than 1"
         )
-    refine_radius = config["evaluation"].get("refine_neighborhood_radius", 2)
-    if (
-        isinstance(refine_radius, bool)
-        or float(refine_radius) != int(refine_radius)
-        or int(refine_radius) < 1
-    ):
-        raise ValueError("evaluation.refine_neighborhood_radius must be a positive integer")
-    refine_sigma = float(config["evaluation"].get("refine_neighborhood_sigma", 1.0))
-    if not math.isfinite(refine_sigma) or refine_sigma <= 0.0:
-        raise ValueError("evaluation.refine_neighborhood_sigma must be finite and positive")
-    neighbor_power = float(
-        config["evaluation"].get("refine_neighbor_reliability_power", 1.0)
-    )
-    if not math.isfinite(neighbor_power) or neighbor_power <= 0.0:
-        raise ValueError(
-            "evaluation.refine_neighbor_reliability_power must be finite and positive"
-        )
     beta = float(config["label_transfer"].get("beta", 2.0))
     iterations = config["label_transfer"].get("iterations", 3)
     if not math.isfinite(beta) or beta < 0.0:
@@ -147,10 +130,10 @@ def validate_config(config: dict[str, Any]) -> None:
     fusion_override_enabled = calibration_fusion.get("enabled", False)
     if not isinstance(fusion_override_enabled, bool):
         raise ValueError("uncertainty.calibration_fusion.enabled must be a boolean")
-    fusion_xi = float(calibration_fusion.get("xi", 8.0))
+    fusion_xi = float(calibration_fusion.get("xi", 4.0))
     if not math.isfinite(fusion_xi) or fusion_xi <= 0.0:
         raise ValueError("uncertainty.calibration_fusion.xi must be finite and positive")
-    fusion_bias = float(calibration_fusion.get("bias", -4.8))
+    fusion_bias = float(calibration_fusion.get("bias", -4.0))
     if not math.isfinite(fusion_bias):
         raise ValueError("uncertainty.calibration_fusion.bias must be finite")
     margin_gradient = config["uncertainty"].get("margin_gradient", {})
@@ -159,10 +142,10 @@ def validate_config(config: dict[str, Any]) -> None:
     margin_enabled = margin_gradient.get("enabled", False)
     if not isinstance(margin_enabled, bool):
         raise ValueError("uncertainty.margin_gradient.enabled must be a boolean")
-    margin_weight = float(margin_gradient.get("weight", 0.01))
+    margin_weight = float(margin_gradient.get("weight", 0.03))
     if not math.isfinite(margin_weight) or margin_weight < 0.0:
         raise ValueError("uncertainty.margin_gradient.weight must be finite and non-negative")
-    uncertainty_power = float(margin_gradient.get("uncertainty_power", 1.0))
+    uncertainty_power = float(margin_gradient.get("uncertainty_power", 1.5))
     if not math.isfinite(uncertainty_power) or uncertainty_power < 0.0:
         raise ValueError(
             "uncertainty.margin_gradient.uncertainty_power must be finite and non-negative"

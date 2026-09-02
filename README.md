@@ -99,7 +99,7 @@ receive independently augmented intensity views and keep their independent
 weight an atomic-logit margin penalty. The total training loss is both heads'
 Dice losses plus the weighted penalty on class gaps exceeding the configured
 margin. The default calibration run first overrides the fixed fusion mapping
-to `xi=8.0`, `bias=-4.8`, evaluates the unmodified heads as epoch 0, and then
+to `xi=4.0`, `bias=-4.0`, evaluates the unmodified heads as epoch 0, and then
 runs 50 epochs with validation every epoch. Dice controls checkpoint
 eligibility; ordinary segmentation ECE alone selects among eligible candidates,
 including epoch 0.
@@ -115,23 +115,18 @@ passing the configured Dice tolerance. Equal ECE keeps the earlier checkpoint;
 Risk ECE, Risk Brier, and Dice do not break ties. A run with no Dice-eligible
 checkpoint fails without relabeling `last_calibration.pt` as a best model.
 
-Standalone evaluation applies the complement-neighbor formula to every voxel;
-there is no percentile or predicted-ROI selection gate. Uncertainty and reliable
-neighborhood support still continuously attenuate each update. Evaluation uses
-the checkpoint-compatible `5x5x5` Gaussian neighborhood (`radius=2`,
-`sigma=1.0`). Neighbor voting applies reliability sharpening with power `2.0`,
-so low-uncertainty neighbors have greater relative influence without changing
-the original support term or its fitted `z0`. The configured refine parameters are `iterations=4`,
-`beta=0.75`, and `evaluation.refine_strength_scale=2.84`. With
-`label_transfer.alpha_max=0.35`, the effective update ceiling is `0.994`, kept
-strictly below one so the update remains a convex probability mixture. This is
-an intentionally aggressive experimental setting, so its correction and error
-introduction rates should be checked with the refine audit outputs. These
-settings and the effective strength are saved in `checkpoint_metadata.json`;
-calibration, Z0 fitting, geometric uncertainty, and checkpoint parameters are
-unchanged.
+Standalone evaluation uses the fixed source-validation optimum for the
+complement-neighbor formula: `iterations=4`, `beta=1.75`, and
+`evaluation.refine_strength_scale=2.8`. With the default
+`label_transfer.alpha_max=0.35`, the effective update ceiling is `0.98`. The
+base value, multiplier, and effective value are saved in
+`checkpoint_metadata.json`; calibration, Z0 fitting, and checkpoint parameters
+are unchanged.
 
-Run the final base/refined evaluation directly:
+The fixed setting was selected from 75 candidates on `source_val` by ordinary
+ECE after a strict no-Dice-degradation guardrail. The external-center results
+were not used for parameter selection. Run the final base/refined evaluation
+directly:
 
 ```bash
 cd /path/to/parent-containing-ours

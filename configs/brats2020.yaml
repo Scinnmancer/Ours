@@ -49,13 +49,13 @@ uncertainty:
   # Applied only after loading the calibration source checkpoint.
   calibration_fusion:
     enabled: true
-    xi: 8.0
-    bias: -4.8
+    xi: 4.0
+    bias: -4.0
   # Calibration-only excessive-gap penalty weighted by geometric uncertainty.
   margin_gradient:
     enabled: true
-    weight: 0.02
-    uncertainty_power: 1.0
+    weight: 0.03
+    uncertainty_power: 1.5
     margin: 1.0
 
 label_transfer:
@@ -63,7 +63,7 @@ label_transfer:
   sigma: 1.0
   gamma: 2.0
   alpha_max: 0.35
-  beta: 0.75
+  beta: 1.75
   iterations: 4
   z0_quantile: 0.5
 
@@ -91,12 +91,8 @@ training:
 evaluation:
   splits: [val, test_CBICA, test_2013, test_TMC]
   workers: 0
-  # Aggressive all-voxel refine: 0.35 * 2.84 = 0.994, kept below 1 for stability.
-  refine_strength_scale: 2.84
-  # Use the checkpoint-compatible 5x5x5 neighborhood and sharpen reliable votes.
-  refine_neighborhood_radius: 2
-  refine_neighborhood_sigma: 1.0
-  refine_neighbor_reliability_power: 2.0
+  # Source-validation optimum for complement-neighbor refine: 0.35 * 2.8 = 0.98.
+  refine_strength_scale: 2.8
   refine_audit:
     enabled: true
     save_nifti: true

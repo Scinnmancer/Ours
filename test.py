@@ -45,28 +45,10 @@ def _configure_test_time_refinement(
             f"received {base_alpha_max} * {strength_scale} = {effective_alpha_max}"
         )
     model.label_transfer.alpha_max = effective_alpha_max
-    neighborhood_radius = int(
-        config["evaluation"].get(
-            "refine_neighborhood_radius", model.label_transfer.radius
-        )
-    )
-    neighborhood_sigma = float(
-        config["evaluation"].get(
-            "refine_neighborhood_sigma", model.label_transfer.sigma
-        )
-    )
-    model.label_transfer.set_neighborhood(neighborhood_radius, neighborhood_sigma)
-    neighbor_reliability_power = float(
-        config["evaluation"].get("refine_neighbor_reliability_power", 1.0)
-    )
-    model.label_transfer.set_neighbor_reliability_power(neighbor_reliability_power)
     return {
         "refine_base_alpha_max": base_alpha_max,
         "refine_strength_scale": strength_scale,
         "refine_effective_alpha_max": effective_alpha_max,
-        "refine_neighborhood_radius": neighborhood_radius,
-        "refine_neighborhood_sigma": neighborhood_sigma,
-        "refine_neighbor_reliability_power": neighbor_reliability_power,
     }
 
 

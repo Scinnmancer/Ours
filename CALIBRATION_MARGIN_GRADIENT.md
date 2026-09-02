@@ -46,12 +46,12 @@ gradient; this prevents the penalty from reducing only the winning class.
 uncertainty:
   calibration_fusion:
     enabled: true
-    xi: 8.0
-    bias: -4.8
+    xi: 4.0
+    bias: -4.0
   margin_gradient:
     enabled: true
-    weight: 0.02
-    uncertainty_power: 1.0
+    weight: 0.03
+    uncertainty_power: 1.5
     margin: 1.0
 
 training:
@@ -60,8 +60,9 @@ training:
   validation_every: 1
 ```
 
-The default linear setting therefore uses ROI-normalized `eps + u`. Its mean
-weight is approximately one, so the configured margin coefficient is not
+The default focused setting uses ROI-normalized `eps + u^1.5`. Its mean weight
+is approximately one, while high-uncertainty voxels receive a larger relative
+gradient than low-uncertainty voxels. The margin coefficient is therefore not
 silently reduced when the absolute uncertainty level is low. The two decoder
 heads use asymmetric training-time `Dropout3d` rates `[0.2, 0.3]`; dropout is
 disabled automatically during validation and inference.
@@ -72,12 +73,14 @@ fusion values loaded from their checkpoint. The override adds no model
 parameter and does not change `state_dict`, so old warmup checkpoints still
 load with `strict=True`.
 
-The recommended mapping places the sigmoid midpoint at disagreement `0.6`:
-`u(0)=0.008`, `u(0.6)=0.5`, and `u(1.0)=0.961`. An offline remapping of the
-current epoch-10 validation maps estimates mean uncertainty near `0.528` for
-correct tumor voxels and `0.772` for error voxels, increasing their numerical
-gap while reducing saturation among correct voxels. These are diagnostic
-expectations rather than checkpoint eligibility conditions.
+The recommended mapping is `u = sigmoid(-4 + 4Z)` and places the sigmoid
+midpoint at disagreement `Z=1.0`: `u(0)=0.018`, `u(0.5)=0.119`,
+`u(1.0)=0.5`, and `u(1.5)=0.881`. Compared with the previous steeper mapping,
+this reduces saturation over ordinary voxels while retaining high uncertainty
+for large geometric disagreement. With representative correct/error
+disagreements `0.77/1.10`, the `u^1.5` weights have a relative ratio of about
+three before ROI mean normalization. These are diagnostic expectations rather
+than checkpoint eligibility conditions.
 
 The BraTS 2020 configuration uses `zernike.chunk_depth: 16` with the existing
 halo-preserving chunk implementation and `training.sw_batch_size: 1`. These
@@ -119,6 +122,6 @@ optimizer state are not resumed. If Zernike statistics are absent, the existing
 statistics fitting pass writes `stats_fitted.pt` before calibration starts. If
 checkpoint metadata has no finite `mean_dice`, the loaded warmup model is
 validated once to establish the Dice eligibility reference. After any fitted
-statistics checkpoint is reloaded, `xi=8.0` and `bias=-4.8` are applied when
+statistics checkpoint is reloaded, `xi=4.0` and `bias=-4.0` are applied when
 `calibration_fusion.enabled=true`; this ordering prevents checkpoint values
 from replacing the configured calibration mapping.
