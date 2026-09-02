@@ -115,17 +115,18 @@ passing the configured Dice tolerance. Equal ECE keeps the earlier checkpoint;
 Risk ECE, Risk Brier, and Dice do not break ties. A run with no Dice-eligible
 checkpoint fails without relabeling `last_calibration.pt` as a best model.
 
-Standalone evaluation applies the complement-neighbor formula only to the
-exact highest-uncertainty 20% of voxels inside each case's predicted tumor plus
-a one-voxel dilation. The gate uses no ground truth. Exact top-k selection
-avoids selecting more than 20% when uncertainty values tie. The configured
-refine parameters are `iterations=4`, `beta=0.75`,
-`uncertainty_top_fraction=0.20`, and
-`evaluation.refine_strength_scale=2.8`. With
-`label_transfer.alpha_max=0.35`, the effective update ceiling is `0.98`.
-Cases with an empty predicted-tumor ROI are left unchanged. These settings and
-the effective strength are saved in `checkpoint_metadata.json`; calibration,
-Z0 fitting, geometric uncertainty, and checkpoint parameters are unchanged.
+Standalone evaluation applies the complement-neighbor formula to every voxel;
+there is no percentile or predicted-ROI selection gate. Uncertainty and reliable
+neighborhood support still continuously attenuate each update. The configured
+refine parameters are `iterations=4`, `beta=0.75`, and
+`evaluation.refine_strength_scale=2.84`. With
+`label_transfer.alpha_max=0.35`, the effective update ceiling is `0.994`, kept
+strictly below one so the update remains a convex probability mixture. This is
+an intentionally aggressive experimental setting, so its correction and error
+introduction rates should be checked with the refine audit outputs. These
+settings and the effective strength are saved in `checkpoint_metadata.json`;
+calibration, Z0 fitting, geometric uncertainty, and checkpoint parameters are
+unchanged.
 
 Run the final base/refined evaluation directly:
 

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,32 +22,17 @@ class UncertaintyGatedLabelTransfer(nn.Module):
         alpha_max: float = 0.35,
         beta: float = 2.0,
         iterations: int = 3,
-        uncertainty_top_fraction: float = 1.0,
-        percentile_roi_dilation: int = 0,
         z0: float = 0.5,
         eps: float = 1e-7,
     ):
         super().__init__()
         if not 0.0 <= alpha_max < 1.0:
             raise ValueError("alpha_max must be in [0, 1)")
-        if (
-            not math.isfinite(uncertainty_top_fraction)
-            or not 0.0 < uncertainty_top_fraction <= 1.0
-        ):
-            raise ValueError("uncertainty_top_fraction must be in (0, 1]")
-        if (
-            isinstance(percentile_roi_dilation, bool)
-            or float(percentile_roi_dilation) != int(percentile_roi_dilation)
-            or int(percentile_roi_dilation) < 0
-        ):
-            raise ValueError("percentile_roi_dilation must be a non-negative integer")
         self.radius = int(radius)
         self.gamma = float(gamma)
         self.alpha_max = float(alpha_max)
         self.beta = float(beta)
         self.iterations = int(iterations)
-        self.uncertainty_top_fraction = float(uncertainty_top_fraction)
-        self.percentile_roi_dilation = int(percentile_roi_dilation)
         self.eps = float(eps)
         self.register_buffer("kernel", gaussian_kernel3d(self.radius, sigma)[None, None])
         self.register_buffer("z0", torch.tensor(float(z0)))
@@ -63,36 +46,6 @@ class UncertaintyGatedLabelTransfer(nn.Module):
         kernel = self.kernel.to(dtype=reliability.dtype)
         return F.conv3d(reliability, kernel, padding=self.radius)
 
-    def selection_mask(
-        self, base_probability: torch.Tensor, uncertainty: torch.Tensor
-    ) -> torch.Tensor:
-        """Select the exact highest-uncertainty fraction inside predicted ROI."""
-        predicted_tumor = base_probability.argmax(dim=1, keepdim=True) != 0
-        dilation = self.percentile_roi_dilation
-        if dilation > 0:
-            size = 2 * dilation + 1
-            predicted_tumor = F.max_pool3d(
-                predicted_tumor.to(dtype=base_probability.dtype),
-                kernel_size=size,
-                stride=1,
-                padding=dilation,
-            ) > 0
-        selected = torch.zeros_like(predicted_tumor, dtype=torch.bool)
-        detached_uncertainty = uncertainty.detach()
-        for batch_index in range(base_probability.shape[0]):
-            roi_flat = predicted_tumor[batch_index, 0].flatten()
-            roi_indices = roi_flat.nonzero(as_tuple=False).flatten()
-            if roi_indices.numel() == 0:
-                continue
-            count = max(
-                1,
-                int(math.ceil(roi_indices.numel() * self.uncertainty_top_fraction)),
-            )
-            values = detached_uncertainty[batch_index, 0].flatten()[roi_indices]
-            chosen = roi_indices[torch.topk(values, k=count, sorted=False).indices]
-            selected[batch_index, 0].view(-1)[chosen] = True
-        return selected
-
     def forward(self, base_probability: torch.Tensor, uncertainty: torch.Tensor) -> torch.Tensor:
         if base_probability.shape[1] != 4 or uncertainty.shape[1] != 1:
             raise ValueError("Expected atomic [B,4,...] probability and [B,1,...] uncertainty")
@@ -102,13 +55,7 @@ class UncertaintyGatedLabelTransfer(nn.Module):
         kernel = self.kernel.to(dtype=p.dtype)
         z = F.conv3d(reliability, kernel, padding=self.radius)
         support = (z / self.z0.to(dtype=z.dtype).clamp_min(self.eps)).clamp(max=1.0)
-        percentile_mask = self.selection_mask(p, uncertainty).to(dtype=p.dtype)
-        alpha = (
-            self.alpha_max
-            * uncertainty.clamp(0.0, 1.0).pow(self.beta)
-            * support
-            * percentile_mask
-        )
+        alpha = self.alpha_max * uncertainty.clamp(0.0, 1.0).pow(self.beta) * support
         q = p
         class_kernel = kernel.expand(p.shape[1], 1, *kernel.shape[2:]).contiguous()
         for _ in range(self.iterations):

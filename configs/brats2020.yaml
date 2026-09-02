@@ -65,10 +65,6 @@ label_transfer:
   alpha_max: 0.35
   beta: 0.75
   iterations: 4
-  # Refine only the exact highest-uncertainty 20% inside the predicted tumor
-  # plus a one-voxel dilation. Ground truth is never used by this gate.
-  uncertainty_top_fraction: 0.20
-  percentile_roi_dilation: 1
   z0_quantile: 0.5
 
 training:
@@ -95,8 +91,8 @@ training:
 evaluation:
   splits: [val, test_CBICA, test_2013, test_TMC]
   workers: 0
-  # Source-validation optimum for complement-neighbor refine: 0.35 * 2.8 = 0.98.
-  refine_strength_scale: 2.8
+  # Aggressive all-voxel refine: 0.35 * 2.84 = 0.994, kept below 1 for stability.
+  refine_strength_scale: 2.84
   refine_audit:
     enabled: true
     save_nifti: true
