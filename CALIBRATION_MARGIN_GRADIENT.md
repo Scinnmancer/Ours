@@ -46,8 +46,8 @@ gradient; this prevents the penalty from reducing only the winning class.
 uncertainty:
   calibration_fusion:
     enabled: true
-    xi: 4.0
-    bias: -4.0
+    xi: 6.0
+    bias: -5.5
   margin_gradient:
     enabled: true
     weight: 0.03
@@ -73,14 +73,13 @@ fusion values loaded from their checkpoint. The override adds no model
 parameter and does not change `state_dict`, so old warmup checkpoints still
 load with `strict=True`.
 
-The recommended mapping is `u = sigmoid(-4 + 4Z)` and places the sigmoid
-midpoint at disagreement `Z=1.0`: `u(0)=0.018`, `u(0.5)=0.119`,
-`u(1.0)=0.5`, and `u(1.5)=0.881`. Compared with the previous steeper mapping,
-this reduces saturation over ordinary voxels while retaining high uncertainty
-for large geometric disagreement. With representative correct/error
-disagreements `0.77/1.10`, the `u^1.5` weights have a relative ratio of about
-three before ROI mean normalization. These are diagnostic expectations rather
-than checkpoint eligibility conditions.
+The recommended mapping is `u = sigmoid(6Z - 5.5)` and places the sigmoid
+midpoint at disagreement `Z=0.917`: `u(0)=0.004`, `u(0.5)=0.076`,
+`u(1.0)=0.622`, and `u(1.5)=0.971`. This keeps low-disagreement voxels near
+zero while assigning high uncertainty to large geometric disagreement. With
+representative correct/error disagreements `0.77/1.10`, the `u^1.5` weights
+have a relative ratio of about four before ROI mean normalization. These are
+diagnostic expectations rather than checkpoint eligibility conditions.
 
 The BraTS 2020 configuration uses `zernike.chunk_depth: 16` with the existing
 halo-preserving chunk implementation and `training.sw_batch_size: 1`. These
@@ -122,6 +121,6 @@ optimizer state are not resumed. If Zernike statistics are absent, the existing
 statistics fitting pass writes `stats_fitted.pt` before calibration starts. If
 checkpoint metadata has no finite `mean_dice`, the loaded warmup model is
 validated once to establish the Dice eligibility reference. After any fitted
-statistics checkpoint is reloaded, `xi=4.0` and `bias=-4.0` are applied when
+statistics checkpoint is reloaded, `xi=6.0` and `bias=-5.5` are applied when
 `calibration_fusion.enabled=true`; this ordering prevents checkpoint values
 from replacing the configured calibration mapping.

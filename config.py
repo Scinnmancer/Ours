@@ -130,10 +130,10 @@ def validate_config(config: dict[str, Any]) -> None:
     fusion_override_enabled = calibration_fusion.get("enabled", False)
     if not isinstance(fusion_override_enabled, bool):
         raise ValueError("uncertainty.calibration_fusion.enabled must be a boolean")
-    fusion_xi = float(calibration_fusion.get("xi", 4.0))
+    fusion_xi = float(calibration_fusion.get("xi", 6.0))
     if not math.isfinite(fusion_xi) or fusion_xi <= 0.0:
         raise ValueError("uncertainty.calibration_fusion.xi must be finite and positive")
-    fusion_bias = float(calibration_fusion.get("bias", -4.0))
+    fusion_bias = float(calibration_fusion.get("bias", -5.5))
     if not math.isfinite(fusion_bias):
         raise ValueError("uncertainty.calibration_fusion.bias must be finite")
     margin_gradient = config["uncertainty"].get("margin_gradient", {})

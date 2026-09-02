@@ -49,8 +49,8 @@ uncertainty:
   # Applied only after loading the calibration source checkpoint.
   calibration_fusion:
     enabled: true
-    xi: 4.0
-    bias: -4.0
+    xi: 6.0
+    bias: -5.5
   # Calibration-only excessive-gap penalty weighted by geometric uncertainty.
   margin_gradient:
     enabled: true

@@ -196,8 +196,8 @@ def apply_calibration_fusion_override(
     loaded_bias = float(model.fusion.bias.detach().cpu())
     if enabled:
         model.fusion.set_xi_bias(
-            xi=float(override.get("xi", 4.0)),
-            bias=float(override.get("bias", -4.0)),
+            xi=float(override.get("xi", 6.0)),
+            bias=float(override.get("bias", -5.5)),
         )
     return {
         "enabled": enabled,

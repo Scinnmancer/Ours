@@ -161,8 +161,8 @@ def test_calibration_fusion_override_preserves_state_layout_and_sets_recommended
     config = _config()
     config["uncertainty"]["calibration_fusion"] = {
         "enabled": True,
-        "xi": 4.0,
-        "bias": -4.0,
+        "xi": 6.0,
+        "bias": -5.5,
     }
 
     metadata = apply_calibration_fusion_override(model, config)
@@ -171,12 +171,12 @@ def test_calibration_fusion_override_preserves_state_layout_and_sets_recommended
 
     assert tuple(model.state_dict()) == state_keys
     assert metadata["enabled"] is True
-    assert metadata["effective_xi"] == pytest.approx(4.0, rel=1e-6)
-    assert metadata["effective_bias"] == pytest.approx(-4.0, rel=1e-6)
-    assert float(uncertainty[0]) == pytest.approx(0.01799, abs=1e-4)
-    assert float(uncertainty[1]) == pytest.approx(0.11920, abs=1e-4)
-    assert float(uncertainty[2]) == pytest.approx(0.5, abs=1e-6)
-    assert float(uncertainty[3]) == pytest.approx(0.88080, abs=1e-4)
+    assert metadata["effective_xi"] == pytest.approx(6.0, rel=1e-6)
+    assert metadata["effective_bias"] == pytest.approx(-5.5, rel=1e-6)
+    assert float(uncertainty[0]) == pytest.approx(0.00407, abs=1e-4)
+    assert float(uncertainty[1]) == pytest.approx(0.07586, abs=1e-4)
+    assert float(uncertainty[2]) == pytest.approx(0.62246, abs=1e-4)
+    assert float(uncertainty[3]) == pytest.approx(0.97069, abs=1e-4)
     assert bool(((uncertainty > 0.0) & (uncertainty < 1.0)).all())
 
 
@@ -697,8 +697,8 @@ def test_epoch_zero_remains_best_when_training_ece_gets_worse(monkeypatch, tmp_p
     config = _run_config(tmp_path)
     config["uncertainty"]["calibration_fusion"] = {
         "enabled": True,
-        "xi": 4.0,
-        "bias": -4.0,
+        "xi": 6.0,
+        "bias": -5.5,
     }
     warmup = _tiny_dual_head(monkeypatch)
     warmup.fusion.set_xi_bias(0.5, -6.0)
@@ -723,8 +723,8 @@ def test_epoch_zero_remains_best_when_training_ece_gets_worse(monkeypatch, tmp_p
     assert payload["metrics"]["ece"] == pytest.approx(0.04)
     assert payload["metrics"]["epoch_0_ece"] == pytest.approx(0.04)
     assert payload["metrics"]["best_candidate_source"] == "epoch_0"
-    assert float(best_model.fusion.xi) == pytest.approx(4.0, rel=1e-6)
-    assert float(best_model.fusion.bias) == pytest.approx(-4.0, rel=1e-6)
+    assert float(best_model.fusion.xi) == pytest.approx(6.0, rel=1e-6)
+    assert float(best_model.fusion.bias) == pytest.approx(-5.5, rel=1e-6)
 
 
 def test_training_epoch_replaces_epoch_zero_only_with_lower_eligible_ece(monkeypatch, tmp_path):
