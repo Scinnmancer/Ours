@@ -95,6 +95,16 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "label_transfer.alpha_max * evaluation.refine_strength_scale must be less than 1"
         )
+    refine_radius = config["evaluation"].get("refine_neighborhood_radius", 2)
+    if (
+        isinstance(refine_radius, bool)
+        or float(refine_radius) != int(refine_radius)
+        or int(refine_radius) < 1
+    ):
+        raise ValueError("evaluation.refine_neighborhood_radius must be a positive integer")
+    refine_sigma = float(config["evaluation"].get("refine_neighborhood_sigma", 1.0))
+    if not math.isfinite(refine_sigma) or refine_sigma <= 0.0:
+        raise ValueError("evaluation.refine_neighborhood_sigma must be finite and positive")
     beta = float(config["label_transfer"].get("beta", 2.0))
     iterations = config["label_transfer"].get("iterations", 3)
     if not math.isfinite(beta) or beta < 0.0:

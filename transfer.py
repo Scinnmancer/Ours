@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,17 +31,34 @@ class UncertaintyGatedLabelTransfer(nn.Module):
         if not 0.0 <= alpha_max < 1.0:
             raise ValueError("alpha_max must be in [0, 1)")
         self.radius = int(radius)
+        self.sigma = float(sigma)
         self.gamma = float(gamma)
         self.alpha_max = float(alpha_max)
         self.beta = float(beta)
         self.iterations = int(iterations)
         self.eps = float(eps)
-        self.register_buffer("kernel", gaussian_kernel3d(self.radius, sigma)[None, None])
+        self.register_buffer("kernel", gaussian_kernel3d(self.radius, self.sigma)[None, None])
         self.register_buffer("z0", torch.tensor(float(z0)))
 
     def set_z0(self, value: float | torch.Tensor) -> None:
         value = torch.as_tensor(value, dtype=self.z0.dtype, device=self.z0.device)
         self.z0.copy_(value.clamp_min(self.eps))
+
+    def set_neighborhood(self, radius: int, sigma: float) -> None:
+        """Replace the derived Gaussian kernel after checkpoint loading."""
+        radius = int(radius)
+        sigma = float(sigma)
+        if radius < 1:
+            raise ValueError("radius must be at least 1")
+        if not math.isfinite(sigma) or sigma <= 0.0:
+            raise ValueError("sigma must be finite and greater than 0")
+        self.radius = radius
+        self.sigma = sigma
+        self.kernel = gaussian_kernel3d(
+            radius,
+            sigma,
+            dtype=self.kernel.dtype,
+        )[None, None].to(device=self.kernel.device)
 
     def evidence(self, uncertainty: torch.Tensor) -> torch.Tensor:
         reliability = (1.0 - uncertainty.clamp(0.0, 1.0)).pow(self.gamma)

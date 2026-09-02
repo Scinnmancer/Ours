@@ -117,9 +117,11 @@ checkpoint fails without relabeling `last_calibration.pt` as a best model.
 
 Standalone evaluation applies the complement-neighbor formula to every voxel;
 there is no percentile or predicted-ROI selection gate. Uncertainty and reliable
-neighborhood support still continuously attenuate each update. The configured
-refine parameters are `iterations=4`, `beta=0.75`, and
-`evaluation.refine_strength_scale=2.84`. With
+neighborhood support still continuously attenuate each update. Evaluation uses
+a wider `7x7x7` Gaussian neighborhood (`radius=3`, `sigma=1.5`) after the old
+checkpoint is loaded strictly; the stored training-time kernel therefore remains
+checkpoint-compatible. The configured refine parameters are `iterations=4`,
+`beta=0.75`, and `evaluation.refine_strength_scale=2.84`. With
 `label_transfer.alpha_max=0.35`, the effective update ceiling is `0.994`, kept
 strictly below one so the update remains a convex probability mixture. This is
 an intentionally aggressive experimental setting, so its correction and error

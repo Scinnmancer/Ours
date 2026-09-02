@@ -25,6 +25,8 @@ def test_test_time_refine_strength_doubles_alpha_max_without_state_change():
             "refine_base_alpha_max": 0.35,
             "refine_strength_scale": 2.0,
             "refine_effective_alpha_max": 0.70,
+            "refine_neighborhood_radius": 1,
+            "refine_neighborhood_sigma": 1.0,
         }
     )
     for key, value in transfer.state_dict().items():
@@ -94,6 +96,32 @@ def test_default_config_uses_selected_refine_parameters():
     assert not hasattr(transfer, "selection_mask")
     assert metadata["refine_strength_scale"] == pytest.approx(2.84)
     assert metadata["refine_effective_alpha_max"] == pytest.approx(0.994)
+    assert transfer.radius == 3
+    assert transfer.sigma == pytest.approx(1.5)
+    assert tuple(transfer.kernel.shape) == (1, 1, 7, 7, 7)
+    assert metadata["refine_neighborhood_radius"] == 3
+    assert metadata["refine_neighborhood_sigma"] == pytest.approx(1.5)
+
+
+@pytest.mark.parametrize(
+    ("radius", "sigma"),
+    [(0, 1.0), (1, 0.0), (1, -0.5), (1, float("nan"))],
+)
+def test_invalid_test_time_neighborhood_is_rejected(radius, sigma):
+    model = SimpleNamespace(
+        label_transfer=UncertaintyGatedLabelTransfer(radius=1, alpha_max=0.35)
+    )
+    with pytest.raises(ValueError, match="radius|sigma"):
+        _configure_test_time_refinement(
+            model,
+            {
+                "evaluation": {
+                    "refine_strength_scale": 1.0,
+                    "refine_neighborhood_radius": radius,
+                    "refine_neighborhood_sigma": sigma,
+                }
+            },
+        )
 
 
 @pytest.mark.parametrize("scale", [0.0, -1.0, 3.0])
