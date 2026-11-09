@@ -37,7 +37,7 @@ def main():
         p = infer_volume(model, image.to(device), config, compute_uncertainty=False)
         probability = p.base_class_probability[0].float().cpu().numpy()
     with np.load(args.reference / "support" / f"{case}.npz", allow_pickle=False) as saved:
-        observed = score(probability, labels.numpy().astype(np.uint8), valid, saved["foreground"])
+        observed = score(probability, labels, valid, saved["foreground"])
     with (args.reference.parent / "ours/frame_metrics.csv").open(newline="") as stream:
         expected = next(row for row in csv.DictReader(stream) if row["case"] == case)
     if (observed["ECE"] != float(expected["ECE"])
@@ -49,7 +49,7 @@ def main():
     starts = [(size - length) // 2 for size, length in zip(image.shape[2:], roi)]
     crop = tuple(slice(start, start + length) for start, length in zip(starts, roi))
     image = image[(slice(None), slice(None), *crop)].to(device)
-    labels = labels[crop][None].to(device)
+    labels = torch.as_tensor(labels[crop], device=device, dtype=torch.long)[None]
     for variant in VARIANTS[1:]:
         configure_heads(model, variant)
         model.train()
