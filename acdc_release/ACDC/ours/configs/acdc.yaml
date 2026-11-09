@@ -1,0 +1,104 @@
+experiment: dual_swin_zernike_acdc
+
+paths:
+  data_root: /root/autodl-tmp/database
+  split_json: ../../baseline/jsons/acdc_domain_shift.json
+  run_root: ../runs
+  baseline_checkpoint: ../../baseline/runs/acdc_monai_swinunetr_200ep/model_best.pt
+
+data:
+  roi_size: [32, 192, 192]
+  target_spacing: [1.5625, 1.5625, 5.0]
+  workers: 2
+  debug_cases: 0
+
+model:
+  in_channels: 1
+  num_classes: 4
+  output_mode: multiclass_softmax
+  feature_size: 48
+  dropout_rate: 0.0
+  attention_dropout_rate: 0.0
+  dropout_path_rate: 0.0
+  head_dropout_rates: [0.2, 0.3]
+  use_checkpoint: true
+  encoder_warm_start: true
+
+zernike:
+  windows: [3, 5, 7]
+  orders: [[0, 0], [1, 1], [2, 0], [2, 2]]
+  chunk_depth: 16
+  stats_max_batches: 0
+
+uncertainty:
+  eta_init: 1.0
+  xi_init: 1.0
+  bias_init: -2.0
+  lambda_u: 1.0
+  calibration_fusion:
+    enabled: true
+    xi: 8.0
+    bias: -4.8
+  margin_gradient:
+    enabled: true
+    weight: 0.02
+    uncertainty_power: 1.0
+    margin: 1.0
+
+label_transfer:
+  radius: 2
+  sigma: 1.0
+  gamma: 2.0
+  alpha_max: 0.35
+  beta: 1.5
+  iterations: 3
+  z0_quantile: 0.5
+
+training:
+  batch_size: 1
+  iterations_per_epoch: 200
+  warmup_epochs: 150
+  calibration_epochs: 50
+  warmup_validation_every: 5
+  validation_every: 1
+  learning_rate: 0.0001
+  calibration_learning_rate: 0.00001
+  weight_decay: 0.00001
+  scheduler_warmup_epochs: 20
+  amp: true
+  sw_batch_size: 1
+  infer_overlap: 0.5
+  dice_tolerance: 0.01
+  calibration_trainable_scope: heads
+  freeze_segmentation_during_calibration: true
+
+evaluation:
+  splits: [val, test]
+  workers: 0
+  refine_strength_scale: 2.0
+  refine_tuning:
+    beta_values: [1.0, 1.5, 2.0]
+    strength_scales: [1.0, 1.5, 2.0, 2.4]
+    dice_tolerance: 0.0
+    fallback_dice_tolerance: 0.0002
+    ece_tie_tolerance: 0.001
+  max_metric_voxels: 200000
+  calibration_bins: 15
+  high_confidence_threshold: 0.95
+  save_nifti: false
+  release_cuda_cache: true
+
+monitoring:
+  enabled: true
+  hash_baseline_checkpoint: true
+  batch_interval: 0
+  gradient_interval: 10
+  uncertainty_map_every: 10
+  uncertainty_map_dtype: float16
+  uncertainty_map_components: true
+  plateau_patience_validations: 10
+  memory_multiplier_limit: 3.0
+
+reproducibility:
+  seed: 42
+  deterministic: true
