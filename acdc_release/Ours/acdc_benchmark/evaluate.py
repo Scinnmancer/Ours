@@ -427,8 +427,8 @@ def add_arguments(parser):
     parser.add_argument("--ueo", action="store_true")
     parser.add_argument("--ueo-validation", type=Path)
     parser.add_argument("--error-auroc", action="store_true")
-    from .perturbation import VARIANTS
-    parser.add_argument("--perturbation", choices=VARIANTS)
+    from .perturbation import SUPPORTED_VARIANTS
+    parser.add_argument("--perturbation", choices=SUPPORTED_VARIANTS)
     parser.add_argument("--tta", action="store_true")
     parser.add_argument("--tta-batch-size", type=int, default=16)
     parser.add_argument("--tta-lr", type=float, default=1e-3)
