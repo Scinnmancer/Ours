@@ -44,7 +44,8 @@ def build(root, split):
             with (path / "patient_metrics.csv").open(newline="") as stream:
                 patients[key] = {row["patient_id"]: row for row in csv.DictReader(stream)}
             values[key] = dict(manifest["domain"], ueo_threshold=manifest["ueo_threshold"],
-                               tta_skipped_frames=manifest["domain"].get("tta_skipped_frames", 0))
+                               tta_batches=manifest["domain"].get("tta_batches", 0),
+                               tta_optimizer_updates=manifest["domain"].get("tta_optimizer_updates", 0))
     rows, effects = [], []
     for (variant, mode), metrics in values.items():
         control = "dropout", mode

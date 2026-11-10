@@ -197,7 +197,10 @@ def load_predictor(args, config, device):
             trained = payload["config"]["model"].get("head_perturbation", "dropout")
             if trained != args.perturbation:
                 raise ValueError(f"Checkpoint used {trained}, requested {args.perturbation}")
-            return lambda image: predict_frame(model, image, config, args.tta, infer_volume)
+            if args.tta:
+                from .continual_tta import ContinualMeanU
+                return ContinualMeanU(model, config, device, args.tta_lr, infer_volume)
+            return lambda image: predict_frame(model, image, config, False, infer_volume)
 
         def predict(image):
             return infer_volume(model, image, config, compute_uncertainty=False).base_class_probability
@@ -286,6 +289,8 @@ def run(args):
     import torch
     if args.tta and not args.perturbation:
         raise ValueError("--tta requires --perturbation")
+    if args.tta_batch_size < 1 or not np.isfinite(args.tta_lr) or args.tta_lr <= 0:
+        raise ValueError("TTA requires a positive batch size and learning rate")
     if args.perturbation and (args.method != "ours" or not args.error_auroc):
         raise ValueError("--perturbation requires --method ours --error-auroc")
 
@@ -308,7 +313,9 @@ def run(args):
     config["training"]["amp"] = args.amp
     if args.perturbation:
         config["model"]["head_perturbation"] = args.perturbation
-        protocol.update(head_perturbation=args.perturbation, tta=args.tta)
+        protocol.update(head_perturbation=args.perturbation, tta=args.tta,
+                        tta_recipe={"name": "chapter33_continual_mean_u_all_windows_v1",
+                                    "batch_size": args.tta_batch_size, "learning_rate": args.tta_lr})
         torch.manual_seed(42)
     predict = load_predictor(args, config, device)
     checkpoint_hash = sha256(args.checkpoint)
@@ -328,16 +335,19 @@ def run(args):
             ueo_thresholds = np.array([fit["ueo_threshold"]])
         else:
             raise ValueError("Provide --ueo-validation only for UEO on test")
-    reference_protocol = {k: v for k, v in protocol.items() if k not in ("head_perturbation", "tta")}
+    reference_protocol = {k: v for k, v in protocol.items()
+                          if k not in ("head_perturbation", "tta", "tta_recipe")}
     reference = None if args.reference is None else read_reference(args.reference, reference_protocol, expected)
     args.output_dir.mkdir(parents=True, exist_ok=False)
     if reference is None:
         (args.output_dir / "support").mkdir()
     rows, frame_identity = [], {}
+    pending, tta_batches = [], []
     inference_context = torch.no_grad if args.tta else torch.inference_mode
     with inference_context():
         for record, image, labels, valid in cases():
-            prediction = predict(image.to(device))
+            case = record["subject_id"]
+            prediction = predict(image.to(device), case) if args.tta else predict(image.to(device))
             if args.perturbation:
                 output, steps = prediction
                 prediction = output.base_class_probability
@@ -358,6 +368,15 @@ def run(args):
             rows.append(row)
             frame_identity[row["case"]] = identity
             print(f"{args.method} {len(rows)}/{len(expected)} {row['case']} ECE={row['ECE']}", flush=True)
+            if args.tta:
+                pending.append((case, image))
+                if len(pending) == args.tta_batch_size or len(rows) == len(expected):
+                    value, gradient, updated = predict.update(pending)
+                    row["tta_steps"] = updated
+                    tta_batches.append(dict(cases=[name for name, _ in pending], mean_U=value,
+                                            gradient_norm=gradient, updates=updated))
+                    print(f"TTA batch {len(tta_batches)}: mean U={value:.6f}, updates={updated}", flush=True)
+                    pending.clear()
     validate_frames(rows, expected)
     metrics = METRICS + EXTRA_METRICS if geometry else METRICS
     if args.error_auroc:
@@ -375,8 +394,11 @@ def run(args):
             row["UEO"] = float(row["UEO"][index])
         metrics += ("UEO",)
     patients, domain = aggregate(rows, metrics)
+    if args.perturbation:
+        domain["tta_batches"] = len(tta_batches)
+        domain["tta_optimizer_updates"] = sum(batch["updates"] for batch in tta_batches)
     if args.tta:
-        domain["tta_skipped_frames"] = sum(row["tta_steps"] == 0 for row in rows)
+        write_json(args.output_dir / "tta_batches.json", tta_batches)
     write_csv(args.output_dir / "frame_metrics.csv", rows)
     write_csv(args.output_dir / "patient_metrics.csv", patients)
     write_csv(args.output_dir / "domain_metrics.csv", [{"method": args.method, **domain}])
@@ -408,3 +430,5 @@ def add_arguments(parser):
     from .perturbation import VARIANTS
     parser.add_argument("--perturbation", choices=VARIANTS)
     parser.add_argument("--tta", action="store_true")
+    parser.add_argument("--tta-batch-size", type=int, default=16)
+    parser.add_argument("--tta-lr", type=float, default=1e-3)

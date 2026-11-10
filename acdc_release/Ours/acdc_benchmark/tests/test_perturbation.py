@@ -3,6 +3,7 @@ import torch
 from torch import nn
 
 from acdc_benchmark.episodic import predict_frame
+from acdc_benchmark.continual_tta import windows
 from acdc_benchmark.perturbation import FeaturePerturbation
 
 
@@ -27,6 +28,17 @@ def test_cct_guards_and_zero_noise():
     cct = FeaturePerturbation("cct_feature_dropout", 0)
     assert torch.equal(cct(x), x)
     assert torch.equal(cct(-x), -x)
+
+
+def test_chapter33_rectangular_windows_include_end_and_count_overlap():
+    grid = windows((4, 7, 8), (4, 4, 4), .5)
+    assert len(grid) == 9
+    counts = torch.zeros(4, 7, 8)
+    for crop in grid:
+        counts[crop] += 1
+    assert counts.min() == 1
+    assert counts.sum() == len(grid) * 4**3
+    assert grid[-1] == (slice(0, 4), slice(3, 7), slice(4, 8))
 
 
 class Head(nn.Module):
