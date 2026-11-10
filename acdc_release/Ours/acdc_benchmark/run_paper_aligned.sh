@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ $# != 4 ]]; then
-    echo "Usage: bash acdc_benchmark/run_paper_aligned.sh ACDC_ROOT DATA_ROOT ORIGINAL_RUN OUTPUT_DIR" >&2
+if [[ $# -lt 4 || $# -gt 5 ]]; then
+    echo "Usage: bash acdc_benchmark/run_paper_aligned.sh ACDC_ROOT DATA_ROOT ORIGINAL_RUN OUTPUT_DIR [feature_noise_equal20|dropout]" >&2
     exit 2
 fi
+variant=${5:-feature_noise_equal20}
+case "$variant" in
+    feature_noise_equal20|dropout) ;;
+    *) echo "Unknown perturbation: $variant" >&2; exit 2 ;;
+esac
 acdc=$(realpath "$1")
 data=$(realpath "$2")
 original=$(realpath "$3")
@@ -22,7 +27,6 @@ mkdir "$out"
 exec >> "$out/run.log" 2>&1
 "$python" -u -m acdc_benchmark.server_checks --acdc-root "$acdc" --data-root "$data" --split-json "$split_json"
 
-variant=feature_noise_equal20
 echo "Training $variant on 1.5T"
 (cd "$acdc"; "$python" -u -m ours.train --stage all --config "$acdc/ours/configs/acdc.yaml" \
     --set "paths.data_root=$data" --set "paths.split_json=$split_json" \
