@@ -4,7 +4,7 @@ from torch import nn
 
 
 VARIANTS = ("dropout", "feature_noise", "cct_feature_dropout", "feature_cutout")
-SUPPORTED_VARIANTS = (*VARIANTS, "feature_noise_strong")
+SUPPORTED_VARIANTS = (*VARIANTS, "feature_noise_strong", "feature_noise_equal20")
 
 
 class FeaturePerturbation(nn.Module):
@@ -47,11 +47,12 @@ def configure_heads(model, variant):
     strengths = {
         "feature_noise": (0.10, 0.20),
         "feature_noise_strong": (0.20, 0.40),
+        "feature_noise_equal20": (0.20, 0.20),
         "cct_feature_dropout": (0.0, 0.0),
         "feature_cutout": (0.05, 0.10),
     }
     if variant not in strengths:
         raise ValueError(f"Unknown head perturbation {variant}")
+    operator = "feature_noise" if variant.startswith("feature_noise") else variant
     for head, strength in zip((model.head1, model.head2), strengths[variant]):
-        operator = "feature_noise" if variant == "feature_noise_strong" else variant
         head.dropout = FeaturePerturbation(operator, strength)

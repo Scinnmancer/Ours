@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ $# != 5 ]]; then
-    echo "Usage: bash acdc_benchmark/run_stronger_noise.sh ACDC_ROOT DATA_ROOT ORIGINAL_RUN CHAPTER33_RUN OUTPUT_DIR" >&2
+if [[ $# -lt 5 || $# -gt 6 ]]; then
+    echo "Usage: bash acdc_benchmark/run_stronger_noise.sh ACDC_ROOT DATA_ROOT ORIGINAL_RUN CHAPTER33_RUN OUTPUT_DIR [feature_noise_equal20|feature_noise_strong]" >&2
     exit 2
 fi
 acdc=$(realpath "$1")
@@ -15,7 +15,11 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export CUDA_VISIBLE_DEVICES="${GPU:-0}" CUDA_DEVICE_ORDER=PCI_BUS_ID ACDC_DATA_ROOT="$data"
 exec 9>"$(dirname "$data")/.gpu-${GPU:-0}.lock"
 flock -n 9
-variant=feature_noise_strong
+variant=${6:-feature_noise_equal20}
+if [[ "$variant" != feature_noise_equal20 && "$variant" != feature_noise_strong ]]; then
+    echo "Unknown feature noise configuration: $variant" >&2
+    exit 2
+fi
 for split in val test; do
     test -s "$original/error_auroc/$split/baseline/protocol.json"
     test -s "$previous/${split}_table.csv"
@@ -37,7 +41,7 @@ for split in val test; do
             --reference "$original/error_auroc/$split/baseline" --output-dir "$out/$split/$mode" \
             --extended-metrics --error-auroc --ueo "${flags[@]}"
     done
-    "$python" - "$out" "$previous" "$split" <<'PY'
+    "$python" - "$out" "$previous" "$split" "$variant" <<'PY'
 import csv
 import json
 from pathlib import Path
@@ -47,6 +51,7 @@ from acdc_benchmark.perturbation_report import paired_auc
 
 out, previous = map(Path, sys.argv[1:3])
 split = sys.argv[3]
+variant_name = sys.argv[4]
 
 def load(path, name, mode):
     saved = json.loads((path / "protocol.json").read_text())
@@ -61,7 +66,7 @@ def load(path, name, mode):
 
 rows, effects = [], []
 for mode in ("frozen", "tta"):
-    strong, patients, identity = load(out / split / mode, "feature_noise_strong", mode)
+    strong, patients, identity = load(out / split / mode, variant_name, mode)
     for variant in ("dropout", "feature_noise"):
         row, control, control_identity = load(previous / split / variant / mode, variant, mode)
         if control_identity != identity:
