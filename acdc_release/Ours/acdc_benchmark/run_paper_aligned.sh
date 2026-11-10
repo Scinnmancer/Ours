@@ -22,27 +22,25 @@ mkdir "$out"
 exec >> "$out/run.log" 2>&1
 "$python" -u -m acdc_benchmark.server_checks --acdc-root "$acdc" --data-root "$data" --split-json "$split_json"
 
-variants=(dropout feature_noise feature_noise_equal20 cct_feature_dropout feature_cutout)
-for variant in "${variants[@]}"; do
-    echo "Training $variant on 1.5T"
-    (cd "$acdc"; "$python" -u -m ours.train --stage all --config "$acdc/ours/configs/acdc.yaml" \
-        --set "paths.data_root=$data" --set "paths.split_json=$split_json" \
-        --set "paths.run_root=$out/train/$variant" --set "model.head_perturbation=$variant" \
-        --set model.encoder_warm_start=false --set training.paper_aligned=true \
-        --set zernike.descriptor=directional_coefficients --set reproducibility.seed=2026 \
-        --set uncertainty.calibration_fusion.xi=6.0 --set uncertainty.calibration_fusion.bias=-5.5 \
-        --set uncertainty.margin_gradient.weight=0.03 --set uncertainty.margin_gradient.uncertainty_power=1.5 \
-        --set monitoring.uncertainty_map_every=0)
-    checkpoint="$out/train/$variant/dual_swin_zernike_acdc/final.pt"
-    test -s "$checkpoint"
-    for mode in tta frozen; do
-        flags=()
-        if [[ "$mode" == tta ]]; then flags+=(--tta); fi
-        echo "Evaluating 3T $variant $mode"
-        "$python" -u -m acdc_benchmark evaluate --acdc-root "$acdc" --data-root "$data" \
-            --split-json "$split_json" --split test --method ours --checkpoint "$checkpoint" \
-            --directional-zernike --perturbation "$variant" --reference "$reference" \
-            --output-dir "$out/test/$variant/$mode" --extended-metrics --error-auroc "${flags[@]}"
-    done
+variant=feature_noise_equal20
+echo "Training $variant on 1.5T"
+(cd "$acdc"; "$python" -u -m ours.train --stage all --config "$acdc/ours/configs/acdc.yaml" \
+    --set "paths.data_root=$data" --set "paths.split_json=$split_json" \
+    --set "paths.run_root=$out/train/$variant" --set "model.head_perturbation=$variant" \
+    --set model.encoder_warm_start=false --set training.paper_aligned=true \
+    --set zernike.descriptor=directional_coefficients --set reproducibility.seed=2026 \
+    --set uncertainty.calibration_fusion.xi=6.0 --set uncertainty.calibration_fusion.bias=-5.5 \
+    --set uncertainty.margin_gradient.weight=0.03 --set uncertainty.margin_gradient.uncertainty_power=1.5 \
+    --set monitoring.uncertainty_map_every=0)
+checkpoint="$out/train/$variant/dual_swin_zernike_acdc/final.pt"
+test -s "$checkpoint"
+for mode in tta frozen; do
+    flags=()
+    if [[ "$mode" == tta ]]; then flags+=(--tta); fi
+    echo "Evaluating 3T $variant $mode"
+    "$python" -u -m acdc_benchmark evaluate --acdc-root "$acdc" --data-root "$data" \
+        --split-json "$split_json" --split test --method ours --checkpoint "$checkpoint" \
+        --directional-zernike --perturbation "$variant" --reference "$reference" \
+        --output-dir "$out/test/$variant/$mode" --extended-metrics --error-auroc "${flags[@]}"
 done
-"$python" -m acdc_benchmark.perturbation_report "$out" test "${variants[@]}"
+"$python" -m acdc_benchmark.perturbation_report "$out" test "$variant"

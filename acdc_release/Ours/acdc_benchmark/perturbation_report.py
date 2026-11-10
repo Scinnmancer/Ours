@@ -51,12 +51,14 @@ def build(root, split, variants=VARIANTS):
     rows, effects = [], []
     for (variant, mode), metrics in values.items():
         control = "dropout", mode
-        dice_delta = metrics["Dice"] - values[control]["Dice"]
-        rows.append(dict(variant=variant, mode=mode, **metrics,
-                         dice_delta_vs_dropout=dice_delta, dice_cost=dice_delta < -0.01))
-        if variant != "dropout":
-            effects.append(dict(variant=variant, comparison=f"{mode}_vs_dropout",
-                                **paired_auc(patients[variant, mode], patients[control])))
+        row = dict(variant=variant, mode=mode, **metrics)
+        if control in values:
+            dice_delta = metrics["Dice"] - values[control]["Dice"]
+            row.update(dice_delta_vs_dropout=dice_delta, dice_cost=dice_delta < -0.01)
+            if variant != "dropout":
+                effects.append(dict(variant=variant, comparison=f"{mode}_vs_dropout",
+                                    **paired_auc(patients[variant, mode], patients[control])))
+        rows.append(row)
         if mode == "tta":
             effects.append(dict(variant=variant, comparison="tta_vs_frozen",
                                 **paired_auc(patients[variant, mode], patients[variant, "frozen"])))
