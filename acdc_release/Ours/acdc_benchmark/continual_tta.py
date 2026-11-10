@@ -22,8 +22,11 @@ def windows(shape, roi, overlap):
 
 
 @contextmanager
-def seeded(device, case, phase, draw):
-    seed = int.from_bytes(sha256(f"2026:{case}:{phase}:{draw}".encode()).digest()[:8], "big")
+def seeded(device, case, phase, draw, aligned=False):
+    namespace = f"u_min_v1:2026:{case}:{phase}:{draw}" if aligned else f"2026:{case}:{phase}:{draw}"
+    seed = int.from_bytes(sha256(namespace.encode()).digest()[:8], "big")
+    if aligned:
+        seed %= 2**63 - 1
     devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
     with torch.random.fork_rng(devices=devices):
         torch.random.default_generator.manual_seed(seed)
@@ -41,7 +44,8 @@ class ContinualMeanU:
         self.frozen_inference = frozen_inference
         self.roi = tuple(config["data"]["roi_size"])
         self.overlap = config["training"]["infer_overlap"]
-        with seeded(torch.device("cpu"), "adapters", "init", 0):
+        self.aligned = config.get("zernike", {}).get("descriptor") == "directional_coefficients"
+        with seeded(torch.device("cpu"), "adapters", "init", 0, self.aligned):
             self.adapters = torch.nn.ModuleList(MultiScale3DAdapter() for _ in range(3)).to(device)
         self.enabled = False
         model.swinViT.patch_embed.register_forward_hook(
@@ -69,7 +73,7 @@ class ContinualMeanU:
         for crop in grid:
             patch = image[(slice(None), slice(None), *crop)]
             for draw in range(2):
-                with seeded(self.device, case, "evaluation", draw):
+                with seeded(self.device, case, "evaluation", draw, self.aligned):
                     heads = self.model.forward_logits(patch)
                 probabilities[(slice(None), slice(None), *crop)] += sum(
                     h.float().softmax(1) for h in heads) * .25
@@ -87,7 +91,7 @@ class ContinualMeanU:
             denominator = len(batch) * len(grid) * self.roi[0] * self.roi[1] * self.roi[2]
             for crop in grid:
                 patch = image[(slice(None), slice(None), *crop)].to(self.device)
-                with seeded(self.device, case, "adaptation", 0):
+                with seeded(self.device, case, "adaptation", 0, self.aligned):
                     p = [head.float().softmax(1) for head in self.model.forward_logits(patch)]
                 leaves = [value.detach().requires_grad_() for value in p]
                 depth = patch.shape[2]

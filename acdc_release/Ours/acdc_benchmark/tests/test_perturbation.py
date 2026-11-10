@@ -5,6 +5,19 @@ from torch import nn
 from acdc_benchmark.episodic import predict_frame
 from acdc_benchmark.continual_tta import windows
 from acdc_benchmark.perturbation import FeaturePerturbation
+from directional_zernike_project.ours.zernike import MultiScaleZernike
+
+
+def test_directional_descriptor_retains_mirrored_orientation():
+    probability = torch.zeros(1, 4, 9, 9, 9)
+    probability[:, 0] = 1
+    probability[0, 0, 4, 4, 5] = 0
+    probability[0, 1, 4, 4, 5] = 1
+    descriptor = MultiScaleZernike((3, 5, 7), ((0, 0), (1, 1), (2, 0), (2, 2)), chunk_depth=3)
+    coefficients = descriptor(probability)
+    reflected = descriptor(probability.flip(-1))
+    assert coefficients.shape == (1, 3, 4, 10, 9, 9, 9)
+    assert not torch.allclose(coefficients[..., 4, 4, 4], reflected[..., 4, 4, 4])
 
 
 @pytest.mark.parametrize("variant,strength", [

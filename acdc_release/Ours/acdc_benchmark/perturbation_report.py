@@ -25,10 +25,10 @@ def paired_auc(current, reference):
                 ci_high=float(high), paired_patients=len(differences))
 
 
-def build(root, split):
+def build(root, split, variants=VARIANTS):
     values, patients = {}, {}
     reference = None
-    for variant in VARIANTS:
+    for variant in variants:
         for mode in ("frozen", "tta"):
             key = variant, mode
             path = root / split / variant / mode
@@ -43,9 +43,11 @@ def build(root, split):
                 raise ValueError(f"Fixed evaluation reference changed at {path}")
             with (path / "patient_metrics.csv").open(newline="") as stream:
                 patients[key] = {row["patient_id"]: row for row in csv.DictReader(stream)}
-            values[key] = dict(manifest["domain"], ueo_threshold=manifest["ueo_threshold"],
+            values[key] = dict(manifest["domain"],
                                tta_batches=manifest["domain"].get("tta_batches", 0),
                                tta_optimizer_updates=manifest["domain"].get("tta_optimizer_updates", 0))
+            if "ueo_threshold" in manifest:
+                values[key]["ueo_threshold"] = manifest["ueo_threshold"]
     rows, effects = [], []
     for (variant, mode), metrics in values.items():
         control = "dropout", mode
@@ -63,4 +65,4 @@ def build(root, split):
 
 
 if __name__ == "__main__":
-    build(Path(sys.argv[1]), sys.argv[2])
+    build(Path(sys.argv[1]), sys.argv[2], sys.argv[3:] or VARIANTS)

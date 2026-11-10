@@ -764,7 +764,13 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
     telemetry = TrainingTelemetry(run_dir, config, device)
     model = DualHeadSwinUNETR(config).to(device)
     calibration_input = "independent_augmented_views_with_head_" + config["model"].get("head_perturbation", "dropout")
-    loss_function = ACDCSegmentationLoss().to(device)
+    paper_aligned = bool(config["training"].get("paper_aligned", False))
+    if paper_aligned:
+        from monai.losses import DiceLoss
+
+        loss_function = DiceLoss(to_onehot_y=True, softmax=True, include_background=False).to(device)
+    else:
+        loss_function = ACDCSegmentationLoss().to(device)
     train_loader = build_loader(config, "train", "train")
     stats_loader = build_loader(config, "train", "stats")
     val_loader = build_loader(config, "val", "eval")
@@ -1213,8 +1219,12 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                 "Frozen non-head model state changed during calibration: "
                 f"{frozen_calibration_sha256_before} != {frozen_calibration_sha256_after}"
             )
-        z0 = fit_z0(model, val_loader, device, config)
-        telemetry.event("z0_fitted", value=z0, source="validation")
+        if paper_aligned:
+            z0 = float(model.label_transfer.z0)
+            telemetry.event("z0_skipped", reason="no_post_training_source_refinement")
+        else:
+            z0 = fit_z0(model, val_loader, device, config)
+            telemetry.event("z0_fitted", value=z0, source="validation")
         final_path = run_dir / "final.pt"
         final_metrics = dict(calibrated_payload.get("metrics", {}))
         final_metrics.update(
@@ -1251,7 +1261,9 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
             scheduler=scheduler,
             metrics=final_metrics,
         )
-        print(f"fitted Z0={z0:.6f}; final checkpoint={final_path}")
+        if not paper_aligned:
+            print(f"fitted Z0={z0:.6f}")
+        print(f"final checkpoint={final_path}", flush=True)
         telemetry.event(
             "stage_finished",
             stage="calibration",

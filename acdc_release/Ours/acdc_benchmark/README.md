@@ -97,6 +97,12 @@ python -m acdc_benchmark table --results-dir "$OUT/test" --output "$OUT/test_tab
 
 既有方法可用本地 ACDC 项目原有训练入口准备权重。旧入口生成的可靠性表属于旧协议，正式八行表通过以上评估命令生成。
 
+## 与 BraTS 第 3.3 节对齐的 ACDC 实验
+
+在部署后的 `Ours` 目录运行 `bash acdc_benchmark/run_paper_aligned.sh ACDC_ROOT DATA_ROOT ORIGINAL_RUN OUTPUT_DIR`。`ORIGINAL_RUN` 提供原 3T 冻结 Swin 遮罩，`OUTPUT_DIR` 使用一个新目录。
+
+该入口复用 BraTS 的有符号方向 Zernike 实现，每个体素保留 3 个尺度 × 4 类 × 10 个方向分量。五组从头训练，使用与 BraTS 对齐的源域阶段、损失和不确定性参数。ACDC 保留单模态输入、四类 softmax 和自身空间预处理。只保存用于选模的训练期验证指标，跳过训练后源域评估、Z0 拟合和 UEO 阈值拟合。每组训练结束立即运行 3T 在线 TTA，随后从同一检查点做 3T 冻结推理。最后生成 `test_table.csv` 和 `test_paired_auc.csv`，ECE 和评估遮罩沿用原协议。Native AUROC 的 U 来自恒等 Adapter 下的无扰动预测，符合第 3.3 节的不确定性评估定义。
+
 ## 指标和产物
 
 ECE、NLL、Brier、高置信错误比例直接调用 BraTS Ours 的 `FixedECEAccumulator`。所有方法共用冻结 Swin 前景与 GT 前景的并集，并排除 ACDC padding。ECE 为四类 top-label、15 个等宽箱、全遮罩体素。每帧先计算指标，再按患者 ED／ES 等权汇总，最后按患者等权。CSV 中 ECE 保留 0–1 的原值，展示为百分比时乘 100 一次。各方法原训练器的 ECE 只用于其训练流程，统一表格由冻结权重重新推理生成。

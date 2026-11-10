@@ -73,7 +73,11 @@ def aggregate(rows, metrics=METRICS):
 
 def read_reference(directory, protocol, expected):
     manifest = json.loads((directory / "protocol.json").read_text(encoding="utf-8"))
-    if manifest["method"] != "baseline" or manifest["comparison"] != protocol:
+    comparison = manifest["comparison"].copy()
+    # A threshold-free run may reuse the same physical reference exported with UEO.
+    if "ueo" not in protocol:
+        comparison.pop("ueo", None)
+    if manifest["method"] != "baseline" or comparison != protocol:
         raise ValueError("Frozen reference protocol differs from the requested evaluation")
     if set(manifest["frames"]) != {r[0] for r in expected}:
         raise ValueError("Frozen reference frame set differs from the locked split")
@@ -194,9 +198,15 @@ def load_predictor(args, config, device):
         if getattr(args, "perturbation", None):
             from .episodic import predict_frame
 
-            trained = payload["config"]["model"].get("head_perturbation", "dropout")
+            trained_config = payload["config"]
+            trained = trained_config["model"].get("head_perturbation", "dropout")
             if trained != args.perturbation:
                 raise ValueError(f"Checkpoint used {trained}, requested {args.perturbation}")
+            if getattr(args, "directional_zernike", False) and (
+                trained_config["zernike"].get("descriptor") != "directional_coefficients"
+                or not trained_config["training"].get("paper_aligned")
+            ):
+                raise ValueError("Directional evaluation requires a paper-aligned checkpoint")
             if args.tta:
                 from .continual_tta import ContinualMeanU
                 return ContinualMeanU(model, config, device, args.tta_lr, infer_volume)
@@ -293,6 +303,8 @@ def run(args):
         raise ValueError("TTA requires a positive batch size and learning rate")
     if args.perturbation and (args.method != "ours" or not args.error_auroc):
         raise ValueError("--perturbation requires --method ours --error-auroc")
+    if args.directional_zernike and not args.perturbation:
+        raise ValueError("--directional-zernike requires --perturbation")
 
     if args.method == "baseline" and args.reference is not None:
         raise ValueError("The baseline command produces the reference; omit --reference")
@@ -316,7 +328,10 @@ def run(args):
         protocol.update(head_perturbation=args.perturbation, tta=args.tta,
                         tta_recipe={"name": "chapter33_continual_mean_u_all_windows_v1",
                                     "batch_size": args.tta_batch_size, "learning_rate": args.tta_lr})
-        torch.manual_seed(42)
+        torch.manual_seed(2026 if args.directional_zernike else 42)
+    if args.directional_zernike:
+        config["zernike"]["descriptor"] = "directional_coefficients"
+        protocol["zernike_descriptor"] = config["zernike"]["descriptor"]
     predict = load_predictor(args, config, device)
     checkpoint_hash = sha256(args.checkpoint)
     ueo_thresholds = None
@@ -336,7 +351,7 @@ def run(args):
         else:
             raise ValueError("Provide --ueo-validation only for UEO on test")
     reference_protocol = {k: v for k, v in protocol.items()
-                          if k not in ("head_perturbation", "tta", "tta_recipe")}
+                          if k not in ("head_perturbation", "tta", "tta_recipe", "zernike_descriptor")}
     reference = None if args.reference is None else read_reference(args.reference, reference_protocol, expected)
     args.output_dir.mkdir(parents=True, exist_ok=False)
     if reference is None:
@@ -432,3 +447,4 @@ def add_arguments(parser):
     parser.add_argument("--tta", action="store_true")
     parser.add_argument("--tta-batch-size", type=int, default=16)
     parser.add_argument("--tta-lr", type=float, default=1e-3)
+    parser.add_argument("--directional-zernike", action="store_true")

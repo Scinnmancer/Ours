@@ -255,7 +255,8 @@ def build_loader(
         tuple(float(value) for value in config["data"]["target_spacing"]),
     )
     sampler = None
-    if mode == "train":
+    paper_shuffle = mode == "train" and bool(config["training"].get("paper_aligned", False))
+    if mode == "train" and not paper_shuffle:
         sample_count = int(config["training"].get("iterations_per_epoch", 200)) * int(
             config["training"].get("batch_size", 1)
         )
@@ -263,7 +264,7 @@ def build_loader(
     if distributed:
         if sampler is not None:
             raise ValueError("Distributed ACDC training with replacement sampling is not supported")
-        sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=False)
+        sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=paper_shuffle)
     is_evaluation = mode in ("eval", "test")
     workers = int(
         config.get("evaluation", {}).get("workers", 0)
@@ -274,7 +275,7 @@ def build_loader(
         dataset,
         batch_size=int(config["training"].get("batch_size", 1)) if mode == "train" else 1,
         sampler=sampler,
-        shuffle=False,
+        shuffle=paper_shuffle and not distributed,
         num_workers=workers,
         pin_memory=torch.cuda.is_available() and not is_evaluation,
         persistent_workers=workers > 0 and not is_evaluation,

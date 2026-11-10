@@ -104,8 +104,18 @@ class DualHeadSwinUNETR(nn.Module):
             configure_heads(self, perturbation)
         z_cfg = config["zernike"]
         orders = [tuple(pair) for pair in z_cfg["orders"]]
-        self.zernike = MultiScaleZernike(z_cfg["windows"], orders, chunk_depth=int(z_cfg.get("chunk_depth", 0)))
-        self.zernike_stats = ZernikeStatistics(len(z_cfg["windows"]), 4, len(orders))
+        descriptor = z_cfg.get("descriptor", "magnitude")
+        if descriptor == "directional_coefficients":
+            from directional_zernike_project.ours.zernike import MultiScaleZernike as DirectionalZernike
+
+            self.zernike = DirectionalZernike(z_cfg["windows"], orders, chunk_depth=int(z_cfg.get("chunk_depth", 0)))
+            components = self.zernike.component_count
+        elif descriptor == "magnitude":
+            self.zernike = MultiScaleZernike(z_cfg["windows"], orders, chunk_depth=int(z_cfg.get("chunk_depth", 0)))
+            components = len(orders)
+        else:
+            raise ValueError(f"Unknown Zernike descriptor: {descriptor}")
+        self.zernike_stats = ZernikeStatistics(len(z_cfg["windows"]), self.num_classes, components)
         u_cfg = config["uncertainty"]
         self.fusion = UncertaintyFusion(
             eta=float(u_cfg.get("eta_init", 1.0)),
