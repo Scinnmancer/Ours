@@ -40,12 +40,20 @@ fi
 reference="$original/error_auroc/test/baseline"
 split_json="$acdc/baseline/jsons/acdc_domain_shift.json"
 test -s "$reference/protocol.json"
-mkdir "$out"
+resume=()
+if [[ "${ACDC_RESUME_WARMUP:-0}" == 1 ]]; then
+    test -s "$out/train/$variant/dual_swin_zernike_acdc/last_warmup.pt"
+    test -s "$out/train/$variant/dual_swin_zernike_acdc/best_seg.pt"
+    test ! -e "$out/test"
+    resume+=(--resume-warmup)
+else
+    mkdir "$out"
+fi
 exec >> "$out/run.log" 2>&1
 "$python" -u -m acdc_benchmark.server_checks --acdc-root "$acdc" --data-root "$data" --split-json "$split_json"
 
 echo "Training $variant on 1.5T"
-(cd "$acdc"; "$python" -u -m ours.train --stage all --config "$acdc/ours/configs/acdc.yaml" \
+(cd "$acdc"; "$python" -u -m ours.train --stage all --config "$acdc/ours/configs/acdc.yaml" "${resume[@]}" \
     --set "paths.data_root=$data" --set "paths.split_json=$split_json" \
     --set "paths.run_root=$out/train/$variant" --set "model.head_perturbation=$variant" \
     --set model.encoder_warm_start=false --set training.paper_aligned=true \

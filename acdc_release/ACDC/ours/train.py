@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from .checkpoint import load_checkpoint, save_checkpoint
+from .checkpoint import load_checkpoint, safe_torch_load, save_checkpoint
 from .config import load_config
 from .data import brain_mask, build_loader
 from .inference import autocast_context, infer_volume
@@ -737,11 +737,17 @@ def _load_required(path: Path, model: DualHeadSwinUNETR) -> dict[str, Any]:
     return load_checkpoint(path, model, strict=True)
 
 
-def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Path:
+def run(
+    config: dict[str, Any], stage: str, checkpoint: str | None = None, *, resume_warmup: bool = False
+) -> Path:
+    if resume_warmup and (stage not in ("warmup", "all") or checkpoint is not None):
+        raise ValueError("Warmup resume requires --stage warmup or all, without --checkpoint")
     seed = int(config["reproducibility"]["seed"])
     set_reproducibility(seed, bool(config["reproducibility"].get("deterministic", True)))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     run_dir = _run_dir(config)
+    if resume_warmup and not all((run_dir / name).is_file() for name in ("last_warmup.pt", "best_seg.pt")):
+        raise FileNotFoundError(f"Warmup resume requires both checkpoints in {run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
     save_run_metadata(run_dir, config)
     split_path = Path(config["paths"]["split_json"])
@@ -753,6 +759,7 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
     if (
         stage in ("warmup", "all")
         and checkpoint is None
+        and not resume_warmup
         and bool(config["model"].get("encoder_warm_start", True))
     ):
         baseline = config["paths"].get("baseline_checkpoint")
@@ -795,7 +802,7 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
                 source_stage=payload.get("stage"),
                 source_epoch=payload.get("epoch"),
             )
-        elif bool(config["model"].get("encoder_warm_start", True)):
+        elif not resume_warmup and bool(config["model"].get("encoder_warm_start", True)):
             baseline = config["paths"].get("baseline_checkpoint")
             if not baseline or not Path(baseline).is_file():
                 raise FileNotFoundError(
@@ -816,7 +823,23 @@ def run(config: dict[str, Any], stage: str, checkpoint: str | None = None) -> Pa
         scheduler = _scheduler(optimizer, epochs, int(config["training"].get("scheduler_warmup_epochs", 20)))
         scaler = _make_scaler(bool(config["training"].get("amp", True)) and device.type == "cuda")
         best_dice = -math.inf
-        for epoch in range(epochs):
+        start_epoch = 0
+        if resume_warmup:
+            last_path = run_dir / "last_warmup.pt"
+            payload = load_checkpoint(last_path, model, optimizer=optimizer, scheduler=scheduler)
+            start_epoch = int(payload["epoch"]) + 1
+            if (payload["stage"] != "warmup" or "optimizer" not in payload or "scheduler" not in payload
+                    or not 0 < start_epoch <= epochs or scheduler.last_epoch != start_epoch):
+                raise ValueError(f"Invalid warmup resume state: {last_path}")
+            for section in ("data", "model", "zernike", "uncertainty", "training", "reproducibility"):
+                if payload["config"][section] != config[section]:
+                    raise ValueError(f"Warmup resume configuration differs in {section}")
+            del payload
+            best_dice = float(safe_torch_load(best_seg_path)["metrics"]["mean_dice"])
+            print(f"Restored warmup epoch {start_epoch}/{epochs}, best Dice={best_dice:.6f}", flush=True)
+            telemetry.event("warmup_resumed", completed_epoch=start_epoch, best_mean_dice=best_dice,
+                            checkpoint=str(last_path))
+        for epoch in range(start_epoch, epochs):
             train_metrics = train_epoch(
                 model,
                 train_loader,
@@ -1296,6 +1319,7 @@ def parse_args():
     parser.add_argument("--config", default=str(Path(__file__).with_name("configs") / "acdc.yaml"))
     parser.add_argument("--stage", choices=("warmup", "stats", "calibration", "all"), default="all")
     parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--resume-warmup", action="store_true")
     parser.add_argument("--set", action="append", default=[], dest="overrides")
     return parser.parse_args()
 
@@ -1303,7 +1327,7 @@ def parse_args():
 def main():
     args = parse_args()
     config = load_config(args.config, args.overrides)
-    print(run(config, args.stage, args.checkpoint))
+    print(run(config, args.stage, args.checkpoint, resume_warmup=args.resume_warmup))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +39,17 @@ def save_checkpoint(
         payload["optimizer"] = optimizer.state_dict()
     if scheduler is not None:
         payload["scheduler"] = scheduler.state_dict()
-    torch.save(payload, output)
+    with tempfile.NamedTemporaryFile(dir=output.parent, prefix=f".{output.name}.",
+                                     delete=False) as temporary:
+        temporary_path = Path(temporary.name)
+        try:
+            torch.save(payload, temporary)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary.close()
+            os.replace(temporary_path, output)
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
 
 def load_checkpoint(
