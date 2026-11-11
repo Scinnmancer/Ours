@@ -19,7 +19,9 @@ FixedECEAccumulator = _fixed.FixedECEAccumulator
 support_sha256 = _fixed.support_sha256
 target_sha256 = _fixed.target_sha256
 CLASSES = ("RV", "MYO", "LV")
-METRICS = ("Dice", "dice_RV", "dice_MYO", "dice_LV", "ECE",
+ECE_DEFINITION = "foreground_channel_ovr_all_valid_voxels_15_bins_v1"
+ECE_CHANNELS = tuple(f"ECE_{name}" for name in CLASSES)
+METRICS = ("Dice", "dice_RV", "dice_MYO", "dice_LV", "ECE", *ECE_CHANNELS,
            "fixed_foreground_NLL", "fixed_foreground_Brier", "high_confidence_error_fraction")
 EXTRA_METRICS = ("HD95", *(f"hd95_{name}" for name in CLASSES), "AURC",
                  *(f"miss_{name}" for name in CLASSES))
@@ -109,6 +111,21 @@ def average(values):
     return float(np.mean(values)) if values else None
 
 
+def foreground_channel_ece(probability, labels, valid):
+    count = int(valid.sum())
+    if not count:
+        return dict.fromkeys(ECE_CHANNELS)
+    target = labels[valid]
+    errors = {}
+    for index, name in enumerate(ECE_CHANNELS, start=1):
+        confidence = probability[index, valid]
+        bins = np.minimum((confidence * 15).astype(np.int64), 14)
+        mass = np.bincount(bins, weights=confidence, minlength=15)
+        positives = np.bincount(bins[target == index], minlength=15)
+        errors[name] = float(np.abs(mass - positives).sum() / count)
+    return errors
+
+
 def score(probability, labels, valid, reference_foreground):
     if labels.ndim != 3 or probability.shape != (4, *labels.shape):
         raise ValueError("Expected ACDC four-class probabilities on a 3D label grid")
@@ -127,7 +144,14 @@ def score(probability, labels, valid, reference_foreground):
         denominator = int(predicted.sum()) + int(truth.sum())
         dice[f"dice_{name}"] = 2 * int((predicted & truth).sum()) / denominator if denominator else None
     calibration = accumulator.result()
-    calibration["ece_support"] = "valid_image & (GT foreground | frozen baseline atomic foreground)"
+    channels = foreground_channel_ece(probability, labels, valid)
+    count = int(valid.sum())
+    calibration.update(channels, ECE=average(channels.values()), ece_definition=ECE_DEFINITION,
+                       ece_support="all valid image voxels",
+                       ece_confidence="foreground class probability",
+                       ece_correctness="ground-truth membership of each foreground class",
+                       ece_voxels=count, ece_sampled_voxels=count)
     return {"Dice": average(dice.values()), **dice, **calibration,
-            "ece_support_sha256": support_sha256(support),
+            "ece_support_sha256": support_sha256(valid),
+            "fixed_foreground_support_sha256": support_sha256(support),
             "ece_target_sha256": target_sha256(labels)}

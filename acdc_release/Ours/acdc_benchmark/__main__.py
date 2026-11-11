@@ -18,10 +18,13 @@ def smoke(output_dir):
     observed = score(probabilities, labels, valid, reference)
     expected = FixedECEAccumulator()
     expected.add(probabilities, labels, fixed_support(labels, valid, reference))
-    for key in ("ECE", "fixed_foreground_NLL", "fixed_foreground_Brier",
+    assert observed["fixed_foreground_ECE"] == expected.result()["ECE"]
+    for key in ("fixed_foreground_NLL", "fixed_foreground_Brier",
                 "high_confidence_error_fraction"):
         assert observed[key] == expected.result()[key], key
-    assert observed["ece_voxels"] == 4
+    assert observed["ece_voxels"] == 5
+    np.testing.assert_allclose([observed[f"ECE_{name}"] for name in ("RV", "MYO", "LV")],
+                               [.108, .252, .104])
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "metrics_smoke.json").write_text(
         json.dumps({"synthetic": True, **observed}, indent=2) + "\n", encoding="utf-8"

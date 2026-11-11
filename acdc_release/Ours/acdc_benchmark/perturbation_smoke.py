@@ -40,8 +40,9 @@ def main():
         observed = score(probability, labels, valid, saved["foreground"])
     with (args.reference.parent / "ours/frame_metrics.csv").open(newline="") as stream:
         expected = next(row for row in csv.DictReader(stream) if row["case"] == case)
-    if (observed["ECE"] != float(expected["ECE"])
-            or observed["ece_support_sha256"] != expected["ece_support_sha256"]
+    if (observed["fixed_foreground_ECE"] != float(expected["fixed_foreground_ECE"])
+            or observed["fixed_foreground_support_sha256"]
+            != expected.get("fixed_foreground_support_sha256", expected["ece_support_sha256"])
             or observed["ece_target_sha256"] != expected["ece_target_sha256"]):
         raise RuntimeError("Original ACDC ECE or fixed support changed")
     del p, probability

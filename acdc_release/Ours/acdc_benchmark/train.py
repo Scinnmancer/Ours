@@ -81,7 +81,7 @@ def run(args):
             save_checkpoint(args.output_dir / "model_best.pt", model, ema, optimizer, scaler,
                             epoch + 1, dice, ece, args, method_state, "dice_best")
     evaluate.write_json(args.output_dir / "training_protocol.json", {
-        "method": args.method, "selection": "source validation Dice, then fixed foreground ECE",
+        "method": args.method, "selection": "source validation Dice, then macro foreground-channel ECE",
         "comparison": protocol, "reference_checkpoint_sha256": reference["checkpoint_sha256"],
         "seed": args.seed, "max_epochs": args.max_epochs,
     })

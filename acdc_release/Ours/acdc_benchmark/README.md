@@ -101,7 +101,7 @@ python -m acdc_benchmark table --results-dir "$OUT/test" --output "$OUT/test_tab
 
 在部署后的 `Ours` 目录运行 `bash acdc_benchmark/run_paper_aligned.sh ACDC_ROOT DATA_ROOT ORIGINAL_RUN OUTPUT_DIR [feature_noise_equal20|feature_noise_head1_20|dropout|none] [COMPLETED_NOISE_RUN]`。`ORIGINAL_RUN` 提供原 3T 冻结 Swin 遮罩，`OUTPUT_DIR` 使用一个新目录。
 
-该入口复用 BraTS 的有符号方向 Zernike 实现，每个体素保留 3 个尺度 × 4 类 × 10 个方向分量。每次只从头训练一组，默认双头均使用 ±20% Feature Noise。传入 `dropout` 时两个头分别使用 0.20 和 0.30 的 Dropout3d。两组使用与 BraTS 对齐的源域阶段、损失和不确定性参数。ACDC 保留单模态输入、四类 softmax 和自身空间预处理。只保存用于选模的训练期验证指标，跳过训练后源域评估、Z0 拟合和 UEO 阈值拟合。训练结束立即运行 3T 在线 TTA，随后从同一检查点做 3T 冻结推理。最后生成两行 `test_table.csv` 和患者配对 `test_paired_auc.csv`，ECE 和评估遮罩沿用原协议。Native AUROC 的 U 来自恒等 Adapter 下的无扰动预测，符合第 3.3 节的不确定性评估定义。
+该入口复用 BraTS 的有符号方向 Zernike 实现，每个体素保留 3 个尺度 × 4 类 × 10 个方向分量。每次只从头训练一组，默认双头均使用 ±20% Feature Noise。传入 `dropout` 时两个头分别使用 0.20 和 0.30 的 Dropout3d。两组使用与 BraTS 对齐的源域阶段、损失和不确定性参数。ACDC 保留单模态输入、四类 softmax 和自身空间预处理。只保存用于选模的训练期验证指标，跳过训练后源域评估、Z0 拟合和 UEO 阈值拟合。训练结束立即运行 3T 在线 TTA，随后从同一检查点做 3T 冻结推理。最后生成两行 `test_table.csv` 和患者配对 `test_paired_auc.csv`，ECE 使用上述逐前景通道定义，其余指标沿用各自原有的评估遮罩。Native AUROC 的 U 来自恒等 Adapter 下的无扰动预测，符合第 3.3 节的不确定性评估定义。
 
 传入 `none` 会在训练和 TTA 中关闭两个解码头的扰动。再传入已完成的 `COMPLETED_NOISE_RUN`，脚本会引用该批次的 `feature_noise_equal20` 结果，和新训练的 `none` 组共生成四行 3T 结果，并计算相同推理模式下的患者配对 AUROC 差。
 
@@ -109,11 +109,11 @@ python -m acdc_benchmark table --results-dir "$OUT/test" --output "$OUT/test_tab
 
 ## 指标和产物
 
-ECE、NLL、Brier、高置信错误比例直接调用 BraTS Ours 的 `FixedECEAccumulator`。所有方法共用冻结 Swin 前景与 GT 前景的并集，并排除 ACDC padding。ECE 为四类 top-label、15 个等宽箱、全遮罩体素。每帧先计算指标，再按患者 ED／ES 等权汇总，最后按患者等权。CSV 中 ECE 保留 0–1 的原值，展示为百分比时乘 100 一次。各方法原训练器的 ECE 只用于其训练流程，统一表格由冻结权重重新推理生成。
+ACDC 主表的 ECE 对 RV、MYO、LV 分别以该类概率为打分、该类 GT 成员关系为二分类标签，在全部有效图像体素上用 15 个等宽箱计算。真实背景体素在三类中均作为负样本，人工 padding 不计入。输出 `ECE_RV`、`ECE_MYO`、`ECE_LV`，`ECE` 取三类等权平均。旧口径仍在逐帧 CSV 的 `fixed_foreground_ECE` 中提供。该列及 NLL、Brier、高置信错误比例使用原固定前景遮罩。每帧先计算指标，再按患者 ED／ES 等权汇总，最后按患者等权。CSV 中 ECE 保留 0–1 的原值。
 
 每次评估输出 `frame_metrics.csv`、`patient_metrics.csv`、`domain_metrics.csv`、`protocol.json`。合表核对评估协议、ECE 源码、冻结参考权重身份和逐帧遮罩及标签身份。
 
-在独立输出目录为整个划分的评估加 `--extended-metrics`，可同时输出原始物理网格上的三类 HD95（mm）和固定 ECE 遮罩上的体素 AURC。HD95 使用两方向第 95 百分位表面距离中的较大值，预测为空且 GT 存在时计入漏分帧数。AURC 按最大类别概率降序保留体素，相同置信度使用同一阈值，以新增覆盖率乘该阈值下的累计错误率求和。CSV 保留 AURC 比例原值。
+在独立输出目录为整个划分的评估加 `--extended-metrics`，可同时输出原始物理网格上的三类 HD95（mm）和固定前景遮罩上的体素 AURC。HD95 使用两方向第 95 百分位表面距离中的较大值，预测为空且 GT 存在时计入漏分帧数。AURC 按最大类别概率降序保留体素，相同置信度使用同一阈值，以新增覆盖率乘该阈值下的累计错误率求和。CSV 保留 AURC 比例原值。
 
 追加 `--ueo` 计算固定遮罩内不确定区域与实际误分区域的 Dice。不确定性为 `1 − 最大类别概率`。1.5T 验证从 0.00 到 0.75、步长 0.01 选择患者平均 UEO 最高的阈值，同分取较大阈值。3T 测试同时传入 `--ueo-validation` 指向同方法的 1.5T `protocol.json`，复用已冻结阈值。两个区域均为空时 UEO 取 1。
 

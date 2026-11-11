@@ -10,7 +10,7 @@ import sys
 
 import numpy as np
 
-from .metrics import (ECE_SOURCE_SHA256, EXTRA_METRICS, METRICS, UEO_THRESHOLDS,
+from .metrics import (ECE_DEFINITION, ECE_SOURCE_SHA256, EXTRA_METRICS, METRICS, UEO_THRESHOLDS,
                       average, error_auroc, extended_score, fixed_support, rank_auroc, score, support_sha256,
                       uncertainty_error_overlap)
 
@@ -77,6 +77,8 @@ def read_reference(directory, protocol, expected):
     # A threshold-free run may reuse the same physical reference exported with UEO.
     if "ueo" not in protocol:
         comparison.pop("ueo", None)
+    if "ece_definition" not in comparison:
+        protocol = {k: v for k, v in protocol.items() if k != "ece_definition"}
     if manifest["method"] != "baseline" or comparison != protocol:
         raise ValueError("Frozen reference protocol differs from the requested evaluation")
     if set(manifest["frames"]) != {r[0] for r in expected}:
@@ -97,7 +99,7 @@ def score_frame(probability, labels, valid, record, output, reference, manifest,
             foreground = saved["foreground"]
     values = score(probability, labels, valid, foreground)
     if values["ECE"] is None:
-        raise ValueError(f"{case}: empty fixed ECE support; cannot publish a complete cohort")
+        raise ValueError(f"{case}: no valid image voxels for ECE")
     if geometry is not None:
         values.update(extended_score(probability, labels, valid, foreground, record, *geometry))
     if ueo_thresholds is not None or include_error_auroc:
@@ -108,11 +110,17 @@ def score_frame(probability, labels, valid, record, output, reference, manifest,
     if include_error_auroc:
         values["error_AUROC"] = error_auroc(probability, labels, support)
     identity = {"ece_support_sha256": values["ece_support_sha256"],
+                "fixed_foreground_support_sha256": values["fixed_foreground_support_sha256"],
                 "ece_target_sha256": values["ece_target_sha256"],
                 "valid_image_sha256": support_sha256(valid),
                 "reference_foreground_sha256": support_sha256(foreground)}
-    if manifest is not None and identity != manifest["frames"][case]:
-        raise ValueError(f"{case}: fixed reference support, labels or valid image changed")
+    if manifest is not None:
+        saved_identity = manifest["frames"][case]
+        expected_identity = identity.copy()
+        if "fixed_foreground_support_sha256" not in saved_identity:
+            expected_identity["ece_support_sha256"] = expected_identity.pop("fixed_foreground_support_sha256")
+        if expected_identity != saved_identity:
+            raise ValueError(f"{case}: fixed reference support, labels or valid image changed")
     row = {"case": case, "patient_id": record["patient_id"], "frame": record["frame"],
            "domain": record["domain"], **values, **identity}
     return row, identity
@@ -267,7 +275,7 @@ def load_predictor(args, config, device):
 
 def comparison_protocol(args, config):
     return {"protocol": PROTOCOL, "split": args.split, "split_sha256": split_sha256(args.split_json),
-            "ece_source_sha256": ECE_SOURCE_SHA256,
+            "ece_source_sha256": ECE_SOURCE_SHA256, "ece_definition": ECE_DEFINITION,
             "roi_size": list(config["data"]["roi_size"]),
             "target_spacing": list(config["data"]["target_spacing"]),
             "class_order": ["BG", "RV", "MYO", "LV"],

@@ -4,8 +4,8 @@ import json
 import numpy as np
 import pytest
 
-from acdc_benchmark.evaluate import METHODS, PROTOCOL, SPLIT_SHA256, score_frame, write_csv, write_json
-from acdc_benchmark.metrics import (ECE_SOURCE_SHA256, FixedECEAccumulator, error_auroc, risk_coverage_area,
+from acdc_benchmark.evaluate import METHODS, PROTOCOL, SPLIT_SHA256, read_reference, score_frame, write_csv, write_json
+from acdc_benchmark.metrics import (ECE_DEFINITION, ECE_SOURCE_SHA256, FixedECEAccumulator, error_auroc, risk_coverage_area,
                                     score, uncertainty_error_overlap)
 from acdc_benchmark.table import build_table
 
@@ -21,15 +21,24 @@ def fixture_volume():
     return p, labels, valid, reference
 
 
-def test_today_ece_on_fixed_support():
+def test_ece_uses_foreground_channels_on_all_valid_voxels():
     p, labels, valid, reference = fixture_volume()
     expected = FixedECEAccumulator()
     expected.add(p, labels, np.array([[[True, True, True, True, False]]]))
     result = score(p, labels, valid, reference)
-    for key in ("ECE", "fixed_foreground_NLL", "fixed_foreground_Brier",
+    assert result["fixed_foreground_ECE"] == expected.result()["ECE"]
+    for key in ("fixed_foreground_NLL", "fixed_foreground_Brier",
                 "high_confidence_error_fraction", "ece_voxels"):
         assert result[key] == expected.result()[key]
     assert result["dice_RV"] == 1.0
+    assert [result[f"ECE_{name}"] for name in ("RV", "MYO", "LV")] == pytest.approx([.11, .29, .105])
+    assert result["ECE"] == pytest.approx((.11 + .29 + .105) / 3)
+    valid[:] = True
+    reference[..., -1] = False
+    included = score(p, labels, valid, reference)
+    assert included["ece_voxels"] == 5
+    assert included["ECE_RV"] == pytest.approx(.108)
+    assert included["fixed_foreground_ECE"] == result["fixed_foreground_ECE"]
 
 
 def test_aurc_ties_use_one_coverage_threshold():
@@ -42,6 +51,21 @@ def test_aurc_ties_use_one_coverage_threshold():
     permutation = [0, 2, 1, 3]
     assert risk_coverage_area(probabilities[:, permutation], labels[permutation],
                               support[permutation]) == pytest.approx(expected)
+
+
+def test_new_ece_can_reuse_a_legacy_reference_mask(tmp_path):
+    p, labels, valid, _ = fixture_volume()
+    (tmp_path / "support").mkdir()
+    record = {"subject_id": "p0_ED", "patient_id": "p0", "frame": "ED", "domain": "target_3T"}
+    _, identity = score_frame(p, labels, valid, record, tmp_path, None, None)
+    legacy_identity = identity.copy()
+    legacy_identity["ece_support_sha256"] = legacy_identity.pop("fixed_foreground_support_sha256")
+    protocol = {"protocol": PROTOCOL}
+    write_json(tmp_path / "protocol.json", {"method": "baseline", "comparison": protocol,
+                                           "frames": {"p0_ED": legacy_identity}})
+    reference = read_reference(tmp_path, {**protocol, "ece_definition": ECE_DEFINITION}, {("p0_ED",)})
+    _, checked = score_frame(p, labels, valid, record, tmp_path, tmp_path, reference)
+    assert checked == identity
 
 
 def test_ueo_scores_only_fixed_support_and_includes_threshold_ties():
@@ -69,6 +93,7 @@ def test_complete_table_rejects_reference_mismatch(tmp_path):
     reference = tmp_path / "baseline"
     (reference / "support").mkdir(parents=True)
     protocol = {"protocol": PROTOCOL, "split": "test", "ece_source_sha256": ECE_SOURCE_SHA256,
+                "ece_definition": ECE_DEFINITION,
                 "split_sha256": SPLIT_SHA256}
     baseline = {"method": "baseline", "comparison": protocol, "checkpoint_sha256": "reference",
                 "reference_checkpoint_sha256": "reference", "frames": {}}
@@ -95,7 +120,7 @@ def test_complete_table_rejects_reference_mismatch(tmp_path):
         rows = list(csv.DictReader(stream))
     rows[0]["ECE"] = str(100 * float(rows[0]["ECE"]))
     write_csv(scores, rows)
-    with pytest.raises(ValueError, match="expected matching raw fixed ECE"):
+    with pytest.raises(ValueError, match="expected matching raw ECE"):
         build_table(tmp_path)
     scores.write_text(original)
 

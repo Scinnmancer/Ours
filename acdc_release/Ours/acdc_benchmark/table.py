@@ -1,10 +1,11 @@
 """Assemble the paper table from completed, paired ACDC evaluations."""
 import csv
 import json
+import math
 from pathlib import Path
 
 from .evaluate import METHODS, PROTOCOL, SPLIT_SHA256, aggregate, validate_frames, write_csv
-from .metrics import ECE_SOURCE_SHA256, EXTRA_METRICS, METRICS
+from .metrics import ECE_CHANNELS, ECE_DEFINITION, ECE_SOURCE_SHA256, EXTRA_METRICS, METRICS
 
 IDENTITY_FIELDS = ("ece_support_sha256", "ece_target_sha256", "valid_image_sha256",
                    "reference_foreground_sha256")
@@ -17,9 +18,14 @@ def read_metrics(path, metrics=METRICS):
         for metric in metrics:
             row[metric] = float(row[metric]) if row[metric] else None
         ece = row["ECE"]
-        if (ece is None or not 0.0 <= ece <= 1.0
-                or ece != float(row["fixed_foreground_ECE"])):
-            raise ValueError(f"{path}/{row['case']}: expected matching raw fixed ECE in [0, 1]")
+        channels = [row[name] for name in ECE_CHANNELS if name in metrics]
+        if channels:
+            valid = (all(value is not None and 0 <= value <= 1 for value in channels)
+                     and ece is not None and math.isclose(ece, sum(channels) / len(channels), abs_tol=1e-12))
+        else:
+            valid = ece is not None and ece == float(row["fixed_foreground_ECE"])
+        if not valid or not 0 <= ece <= 1:
+            raise ValueError(f"{path}/{row['case']}: expected matching raw ECE in [0, 1]")
     return rows
 
 
@@ -34,6 +40,13 @@ def build_table(results_dir):
     baseline = manifest(results_dir / "baseline", "baseline")
     protocol = baseline["comparison"]
     metrics = METRICS + EXTRA_METRICS if protocol.get("extended_metrics") else METRICS
+    identity_fields = IDENTITY_FIELDS
+    if "ece_definition" not in protocol:
+        metrics = tuple(metric for metric in metrics if metric not in ECE_CHANNELS)
+    elif protocol["ece_definition"] == ECE_DEFINITION:
+        identity_fields += ("fixed_foreground_support_sha256",)
+    else:
+        raise ValueError("Unknown ECE definition in the baseline protocol")
     if protocol.get("ueo"):
         metrics += ("UEO",)
     if protocol.get("error_auroc"):
@@ -55,7 +68,7 @@ def build_table(results_dir):
         rows = read_metrics(directory / "frame_metrics.csv", metrics)
         validate_frames(rows, expected)
         for row in rows:
-            identity = {name: row[name] for name in IDENTITY_FIELDS}
+            identity = {name: row[name] for name in identity_fields}
             if identity != baseline["frames"][row["case"]]:
                 raise ValueError(f"{method}/{row['case']}: CSV and fixed frame identity differ")
         _, domain = aggregate(rows, metrics)
