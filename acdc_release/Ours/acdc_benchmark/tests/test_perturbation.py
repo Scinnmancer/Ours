@@ -4,7 +4,7 @@ from torch import nn
 
 from acdc_benchmark.episodic import predict_frame
 from acdc_benchmark.continual_tta import windows
-from acdc_benchmark.perturbation import FeaturePerturbation
+from acdc_benchmark.perturbation import FeaturePerturbation, configure_heads
 from directional_zernike_project.ours.zernike import MultiScaleZernike
 
 
@@ -75,6 +75,15 @@ class Model(nn.Module):
 
     def encode(self, image):
         return self.encoder(image)
+
+
+def test_no_perturbation_is_identity_in_training_and_tta():
+    model = Model()
+    configure_heads(model, "none")
+    features = torch.randn(1, 1, 4, 4, 4)
+    for head in (model.head1, model.head2):
+        assert head.dropout.train()(features) is features
+        assert head.dropout.eval()(features) is features
 
 
 def test_tta_updates_only_outputs_and_restores_each_frame():

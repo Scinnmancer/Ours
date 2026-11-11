@@ -1,18 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ $# -lt 4 || $# -gt 5 ]]; then
-    echo "Usage: bash acdc_benchmark/run_paper_aligned.sh ACDC_ROOT DATA_ROOT ORIGINAL_RUN OUTPUT_DIR [feature_noise_equal20|dropout]" >&2
+if [[ $# -lt 4 || $# -gt 6 ]]; then
+    echo "Usage: bash acdc_benchmark/run_paper_aligned.sh ACDC_ROOT DATA_ROOT ORIGINAL_RUN OUTPUT_DIR [feature_noise_equal20|dropout|none] [COMPLETED_NOISE_RUN]" >&2
     exit 2
 fi
 variant=${5:-feature_noise_equal20}
 case "$variant" in
-    feature_noise_equal20|dropout) ;;
+    feature_noise_equal20|dropout|none) ;;
     *) echo "Unknown perturbation: $variant" >&2; exit 2 ;;
 esac
 acdc=$(realpath "$1")
 data=$(realpath "$2")
 original=$(realpath "$3")
 out=$(realpath -m "$4")
+noise_results=
+if [[ $# == 6 ]]; then
+    if [[ "$variant" != none ]]; then
+        echo "COMPLETED_NOISE_RUN requires the none variant" >&2
+        exit 2
+    fi
+    noise_results="$(realpath "$6")/test/feature_noise_equal20"
+    for mode in frozen tta; do
+        test -s "$noise_results/$mode/protocol.json"
+        test -s "$noise_results/$mode/patient_metrics.csv"
+    done
+fi
 python=${PYTHON_BIN:-python}
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
@@ -47,4 +59,9 @@ for mode in tta frozen; do
         --directional-zernike --perturbation "$variant" --reference "$reference" \
         --output-dir "$out/test/$variant/$mode" --extended-metrics --error-auroc "${flags[@]}"
 done
-"$python" -m acdc_benchmark.perturbation_report "$out" test "$variant"
+if [[ -n "$noise_results" ]]; then
+    ln -s "$noise_results" "$out/test/feature_noise_equal20"
+    "$python" -m acdc_benchmark.perturbation_report "$out" test none feature_noise_equal20 --control none
+else
+    "$python" -m acdc_benchmark.perturbation_report "$out" test "$variant"
+fi

@@ -1,7 +1,7 @@
 """Summarize frozen and adapted ACDC perturbation runs."""
+import argparse
 import csv
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +25,7 @@ def paired_auc(current, reference):
                 ci_high=float(high), paired_patients=len(differences))
 
 
-def build(root, split, variants=VARIANTS):
+def build(root, split, variants=VARIANTS, control_variant="dropout"):
     values, patients = {}, {}
     reference = None
     for variant in variants:
@@ -50,13 +50,13 @@ def build(root, split, variants=VARIANTS):
                 values[key]["ueo_threshold"] = manifest["ueo_threshold"]
     rows, effects = [], []
     for (variant, mode), metrics in values.items():
-        control = "dropout", mode
+        control = control_variant, mode
         row = dict(variant=variant, mode=mode, **metrics)
         if control in values:
             dice_delta = metrics["Dice"] - values[control]["Dice"]
-            row.update(dice_delta_vs_dropout=dice_delta, dice_cost=dice_delta < -0.01)
-            if variant != "dropout":
-                effects.append(dict(variant=variant, comparison=f"{mode}_vs_dropout",
+            row.update({f"dice_delta_vs_{control_variant}": dice_delta, "dice_cost": dice_delta < -0.01})
+            if variant != control_variant:
+                effects.append(dict(variant=variant, comparison=f"{mode}_vs_{control_variant}",
                                     **paired_auc(patients[variant, mode], patients[control])))
         rows.append(row)
         if mode == "tta":
@@ -67,4 +67,10 @@ def build(root, split, variants=VARIANTS):
 
 
 if __name__ == "__main__":
-    build(Path(sys.argv[1]), sys.argv[2], sys.argv[3:] or VARIANTS)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("root", type=Path)
+    parser.add_argument("split")
+    parser.add_argument("variants", nargs="*")
+    parser.add_argument("--control", default="dropout")
+    args = parser.parse_args()
+    build(args.root, args.split, args.variants or VARIANTS, args.control)

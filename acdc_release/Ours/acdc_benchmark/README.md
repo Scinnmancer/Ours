@@ -99,9 +99,11 @@ python -m acdc_benchmark table --results-dir "$OUT/test" --output "$OUT/test_tab
 
 ## 与 BraTS 第 3.3 节对齐的 ACDC 实验
 
-在部署后的 `Ours` 目录运行 `bash acdc_benchmark/run_paper_aligned.sh ACDC_ROOT DATA_ROOT ORIGINAL_RUN OUTPUT_DIR [feature_noise_equal20|dropout]`。`ORIGINAL_RUN` 提供原 3T 冻结 Swin 遮罩，`OUTPUT_DIR` 使用一个新目录。
+在部署后的 `Ours` 目录运行 `bash acdc_benchmark/run_paper_aligned.sh ACDC_ROOT DATA_ROOT ORIGINAL_RUN OUTPUT_DIR [feature_noise_equal20|dropout|none] [COMPLETED_NOISE_RUN]`。`ORIGINAL_RUN` 提供原 3T 冻结 Swin 遮罩，`OUTPUT_DIR` 使用一个新目录。
 
 该入口复用 BraTS 的有符号方向 Zernike 实现，每个体素保留 3 个尺度 × 4 类 × 10 个方向分量。每次只从头训练一组，默认双头均使用 ±20% Feature Noise。传入 `dropout` 时两个头分别使用 0.20 和 0.30 的 Dropout3d。两组使用与 BraTS 对齐的源域阶段、损失和不确定性参数。ACDC 保留单模态输入、四类 softmax 和自身空间预处理。只保存用于选模的训练期验证指标，跳过训练后源域评估、Z0 拟合和 UEO 阈值拟合。训练结束立即运行 3T 在线 TTA，随后从同一检查点做 3T 冻结推理。最后生成两行 `test_table.csv` 和患者配对 `test_paired_auc.csv`，ECE 和评估遮罩沿用原协议。Native AUROC 的 U 来自恒等 Adapter 下的无扰动预测，符合第 3.3 节的不确定性评估定义。
+
+传入 `none` 会在训练和 TTA 中关闭两个解码头的扰动。再传入已完成的 `COMPLETED_NOISE_RUN`，脚本会引用该批次的 `feature_noise_equal20` 结果，和新训练的 `none` 组共生成四行 3T 结果，并计算相同推理模式下的患者配对 AUROC 差。
 
 ## 指标和产物
 
