@@ -10,8 +10,8 @@ import sys
 
 import numpy as np
 
-from .metrics import (ECE_DEFINITION, ECE_SOURCE_SHA256, EXTRA_METRICS, METRICS, UEO_THRESHOLDS,
-                      average, error_auroc, extended_score, fixed_support, rank_auroc, score, support_sha256,
+from .metrics import (CLASSES, ECE_DEFINITION, ECE_SOURCE_SHA256, EXTRA_METRICS, METRICS, UEO_THRESHOLDS,
+                      average, error_auroc, extended_score, fixed_support, rank_auroc, score, segmentation_dice, support_sha256,
                       uncertainty_error_overlap)
 
 ACDC_ROOT = Path(__file__).resolve().parents[2] / "ACDC"
@@ -19,6 +19,8 @@ METHODS = ("baseline", "nacl", "ml1_ace", "mbls", "edl", "devis", "fgrm", "ours"
 EXISTING_ADAPTERS = ("ml1_ace", "devis", "fgrm")
 PROTOCOL = "acdc_fixed_reference_foreground_v1"
 SPLIT_SHA256 = "eedc8967964d2b71719738efb2ecd8e834efc222c5b55a2fe70939b2c9d29420"
+HEAD_DICE_METRICS = tuple(f"head{head}_{metric}" for head in (1, 2)
+                          for metric in ("Dice", *(f"dice_{name}" for name in CLASSES)))
 
 
 def sha256(path):
@@ -217,7 +219,8 @@ def load_predictor(args, config, device):
                 raise ValueError("Directional evaluation requires a paper-aligned checkpoint")
             if args.tta:
                 from .continual_tta import ContinualMeanU
-                return ContinualMeanU(model, config, device, args.tta_lr, infer_volume)
+                return ContinualMeanU(model, config, device, args.tta_lr, infer_volume,
+                                      record_heads=getattr(args, "save_head_segmentations", False))
             return lambda image: predict_frame(model, image, config, False, infer_volume)
 
         def predict(image):
@@ -313,6 +316,8 @@ def run(args):
         raise ValueError("--perturbation requires --method ours --error-auroc")
     if args.directional_zernike and not args.perturbation:
         raise ValueError("--directional-zernike requires --perturbation")
+    if args.save_head_segmentations and not args.perturbation:
+        raise ValueError("--save-head-segmentations requires --perturbation")
 
     if args.method == "baseline" and args.reference is not None:
         raise ValueError("The baseline command produces the reference; omit --reference")
@@ -364,6 +369,13 @@ def run(args):
     args.output_dir.mkdir(parents=True, exist_ok=False)
     if reference is None:
         (args.output_dir / "support").mkdir()
+    if args.save_head_segmentations:
+        import SimpleITK as sitk
+        from ours.data import restore_prediction_to_original
+
+        segmentation_dir = args.output_dir / "head_segmentations"
+        segmentation_dir.mkdir()
+        head_geometry = (tuple(protocol["roi_size"]), tuple(protocol["target_spacing"]))
     rows, frame_identity = [], {}
     pending, tta_batches = [], []
     inference_context = torch.no_grad if args.tta else torch.inference_mode
@@ -388,6 +400,16 @@ def run(args):
                 row.update(native_AUROC=rank_auroc(native[support],
                                                    probability[:, support].argmax(0) != labels[support]),
                            head_probability_l1=float(difference[support].mean()), tta_steps=steps)
+                if args.save_head_segmentations:
+                    head_probabilities = (output.tta_head_class_probabilities if args.tta
+                                          else output.head_class_probabilities)
+                    for index, head in enumerate(head_probabilities, start=1):
+                        segmentation = head[0].argmax(0).cpu().numpy().astype(np.uint8)
+                        row.update({f"head{index}_{k}": v
+                                    for k, v in segmentation_dice(segmentation, labels, valid).items()})
+                        native_segmentation = restore_prediction_to_original(
+                            segmentation, record["image"], record["label"], *head_geometry)
+                        sitk.WriteImage(native_segmentation, str(segmentation_dir / f"{case}_head{index}.nii.gz"))
             rows.append(row)
             frame_identity[row["case"]] = identity
             print(f"{args.method} {len(rows)}/{len(expected)} {row['case']} ECE={row['ECE']}", flush=True)
@@ -406,6 +428,10 @@ def run(args):
         metrics += ("error_AUROC",)
     if args.perturbation:
         metrics += ("native_AUROC", "head_probability_l1", "tta_steps")
+    if args.save_head_segmentations:
+        metrics += HEAD_DICE_METRICS
+        if len(list(segmentation_dir.glob("*.nii.gz"))) != 2 * len(expected):
+            raise RuntimeError("Per-head segmentation exports do not cover the complete cohort")
     ueo_metadata = {}
     if ueo_thresholds is not None:
         # The locked split has exactly two frames per patient, so frame means
@@ -456,3 +482,4 @@ def add_arguments(parser):
     parser.add_argument("--tta-batch-size", type=int, default=16)
     parser.add_argument("--tta-lr", type=float, default=1e-3)
     parser.add_argument("--directional-zernike", action="store_true")
+    parser.add_argument("--save-head-segmentations", action="store_true")

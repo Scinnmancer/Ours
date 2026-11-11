@@ -1,9 +1,11 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
 
 from acdc_benchmark.episodic import predict_frame
-from acdc_benchmark.continual_tta import windows
+from acdc_benchmark.continual_tta import ContinualMeanU, windows
 from acdc_benchmark.perturbation import FeaturePerturbation, configure_heads
 from directional_zernike_project.ours.zernike import MultiScaleZernike
 
@@ -103,6 +105,32 @@ def test_single_head_noise_only_changes_the_first_head():
         head.dropout.train()
     assert not torch.equal(model.head1.dropout(features), noisy)
     assert model.head2.dropout(features) is features
+
+
+def test_continual_tta_records_both_heads_without_changing_fusion():
+    class WindowModel(Model):
+        def __init__(self):
+            super().__init__()
+            self.swinViT = nn.Module()
+            self.swinViT.patch_embed = nn.Identity()
+
+        def forward_logits(self, image):
+            zero = torch.zeros_like(image)
+            return (torch.cat((zero, image, zero, zero), dim=1),
+                    torch.cat((zero, zero, image * 2, zero), dim=1))
+
+    image = torch.ones(1, 1, 4, 7, 8)
+    config = {"data": {"roi_size": [4, 4, 4]}, "training": {"infer_overlap": .5}}
+    model = WindowModel()
+
+    def frozen(model, image, config, compute_uncertainty):
+        return SimpleNamespace(base_class_probability=image.expand(-1, 4, -1, -1, -1))
+
+    tta = ContinualMeanU(model, config, torch.device("cpu"), 1e-3, frozen, record_heads=True)
+    output, _ = tta(image, "example")
+    head1, head2 = output.tta_head_class_probabilities
+    assert (head1.argmax(1) == 1).all() and (head2.argmax(1) == 2).all()
+    torch.testing.assert_close(output.base_class_probability, (head1 + head2) * .5)
 
 
 def test_tta_updates_only_outputs_and_restores_each_frame():

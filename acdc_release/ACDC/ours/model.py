@@ -24,6 +24,7 @@ class DualHeadOutput:
     zernike_disagreement: torch.Tensor | None = None
     uncertainty: torch.Tensor | None = None
     refined_class_probability: torch.Tensor | None = None
+    tta_head_class_probabilities: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 class DecoderBranch(nn.Module):

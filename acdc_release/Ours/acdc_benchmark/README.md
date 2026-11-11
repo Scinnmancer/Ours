@@ -107,6 +107,8 @@ python -m acdc_benchmark table --results-dir "$OUT/test" --output "$OUT/test_tab
 
 传入 `feature_noise_head1_20` 会在训练和 TTA 中仅对头 1 使用 ±20% Feature Noise，头 2 直接传递解码特征。该批次生成同一权重的 3T TTA 和冻结对照结果。
 
+设置 `ACDC_CALIBRATION_SOURCE_RUN` 为已完成的同一扰动组运行目录，可复用该组预训练权重与拟合好的 Zernike 统计，只运行 1.5T 微调和 3T 评估。设置 `ACDC_MARGIN_WEIGHT` 可调整间隔损失权重，默认 `0.03`。3T TTA 和冻结推理均输出原始图像网格上的两个头的 NIfTI 分割和各自的 Dice。TTA 使用每个头在当前批次更新前的两次采样概率均值，重叠窗口也取平均。
+
 ## 指标和产物
 
 ACDC 主表的 ECE 对 RV、MYO、LV 分别以该类概率为打分、该类 GT 成员关系为二分类标签，在全部有效图像体素上用 15 个等宽箱计算。真实背景体素在三类中均作为负样本，人工 padding 不计入。输出 `ECE_RV`、`ECE_MYO`、`ECE_LV`，`ECE` 取三类等权平均。旧口径仍在逐帧 CSV 的 `fixed_foreground_ECE` 中提供。该列及 NLL、Brier、高置信错误比例使用原固定前景遮罩。每帧先计算指标，再按患者 ED／ES 等权汇总，最后按患者等权。CSV 中 ECE 保留 0–1 的原值。

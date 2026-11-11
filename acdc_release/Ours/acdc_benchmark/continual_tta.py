@@ -37,11 +37,12 @@ def seeded(device, case, phase, draw, aligned=False):
 
 
 class ContinualMeanU:
-    def __init__(self, model, config, device, learning_rate, frozen_inference):
+    def __init__(self, model, config, device, learning_rate, frozen_inference, record_heads=False):
         self.model = model.eval().requires_grad_(False)
         self.config = config
         self.device = device
         self.frozen_inference = frozen_inference
+        self.record_heads = record_heads
         self.roi = tuple(config["data"]["roi_size"])
         self.overlap = config["training"]["infer_overlap"]
         self.aligned = config.get("zernike", {}).get("descriptor") == "directional_coefficients"
@@ -70,15 +71,21 @@ class ContinualMeanU:
         grid = windows(image.shape[2:], self.roi, self.overlap)
         counts = torch.zeros(image.shape[2:], device=self.device, dtype=torch.int32)
         probabilities = torch.zeros_like(output.base_class_probability, dtype=torch.float32)
+        head_probabilities = [torch.zeros_like(probabilities) for _ in range(2)] if self.record_heads else []
         for crop in grid:
-            patch = image[(slice(None), slice(None), *crop)]
+            index = (slice(None), slice(None), *crop)
+            patch = image[index]
             for draw in range(2):
                 with seeded(self.device, case, "evaluation", draw, self.aligned):
                     heads = self.model.forward_logits(patch)
-                probabilities[(slice(None), slice(None), *crop)] += sum(
-                    h.float().softmax(1) for h in heads) * .25
+                patch_probabilities = [h.float().softmax(1) for h in heads]
+                probabilities[index] += sum(patch_probabilities) * .25
+                for full, patch_probability in zip(head_probabilities, patch_probabilities):
+                    full[index] += patch_probability * .5
             counts[crop] += 1
         output.base_class_probability = probabilities / counts
+        if self.record_heads:
+            output.tta_head_class_probabilities = tuple(full / counts for full in head_probabilities)
         return output, 0
 
     @torch.enable_grad()

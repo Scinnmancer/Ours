@@ -126,6 +126,16 @@ def foreground_channel_ece(probability, labels, valid):
     return errors
 
 
+def segmentation_dice(prediction, labels, valid):
+    dice = {}
+    for index, name in enumerate(CLASSES, start=1):
+        predicted = valid & (prediction == index)
+        truth = labels == index
+        denominator = int(predicted.sum()) + int(truth.sum())
+        dice[f"dice_{name}"] = 2 * int((predicted & truth).sum()) / denominator if denominator else None
+    return {"Dice": average(dice.values()), **dice}
+
+
 def score(probability, labels, valid, reference_foreground):
     if labels.ndim != 3 or probability.shape != (4, *labels.shape):
         raise ValueError("Expected ACDC four-class probabilities on a 3D label grid")
@@ -136,13 +146,7 @@ def score(probability, labels, valid, reference_foreground):
     for start in range(0, labels.shape[0], 16):
         slab = slice(start, start + 16)
         accumulator.add(probability[:, slab], labels[slab], support[slab])
-    prediction = probability.argmax(0)
-    dice = {}
-    for index, name in enumerate(CLASSES, start=1):
-        predicted = valid & (prediction == index)
-        truth = labels == index
-        denominator = int(predicted.sum()) + int(truth.sum())
-        dice[f"dice_{name}"] = 2 * int((predicted & truth).sum()) / denominator if denominator else None
+    dice = segmentation_dice(probability.argmax(0), labels, valid)
     calibration = accumulator.result()
     channels = foreground_channel_ece(probability, labels, valid)
     count = int(valid.sum())
@@ -151,7 +155,7 @@ def score(probability, labels, valid, reference_foreground):
                        ece_confidence="foreground class probability",
                        ece_correctness="ground-truth membership of each foreground class",
                        ece_voxels=count, ece_sampled_voxels=count)
-    return {"Dice": average(dice.values()), **dice, **calibration,
+    return {**dice, **calibration,
             "ece_support_sha256": support_sha256(valid),
             "fixed_foreground_support_sha256": support_sha256(support),
             "ece_target_sha256": target_sha256(labels)}
