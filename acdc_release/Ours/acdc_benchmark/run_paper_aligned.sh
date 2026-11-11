@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ $# -lt 4 || $# -gt 6 ]]; then
-    echo "Usage: bash acdc_benchmark/run_paper_aligned.sh ACDC_ROOT DATA_ROOT ORIGINAL_RUN OUTPUT_DIR [feature_noise_equal20|dropout|none] [COMPLETED_NOISE_RUN]" >&2
+    echo "Usage: bash acdc_benchmark/run_paper_aligned.sh ACDC_ROOT DATA_ROOT ORIGINAL_RUN OUTPUT_DIR [feature_noise_equal20|feature_noise_head1_20|dropout|none] [COMPLETED_NOISE_RUN]" >&2
     exit 2
 fi
 variant=${5:-feature_noise_equal20}
 case "$variant" in
-    feature_noise_equal20|dropout|none) ;;
+    feature_noise_equal20|feature_noise_head1_20|dropout|none) ;;
     *) echo "Unknown perturbation: $variant" >&2; exit 2 ;;
 esac
 acdc=$(realpath "$1")
@@ -30,7 +30,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export CUDA_VISIBLE_DEVICES="${GPU:-0}" CUDA_DEVICE_ORDER=PCI_BUS_ID ACDC_DATA_ROOT="$data"
 exec 9>"$(dirname "$data")/.gpu-${GPU:-0}.lock"
-flock -n 9
+if [[ "${ACDC_WAIT_FOR_GPU:-0}" == 1 ]]; then
+    echo "Waiting for the ACDC GPU lock"
+    flock 9
+else
+    flock -n 9
+fi
 
 reference="$original/error_auroc/test/baseline"
 split_json="$acdc/baseline/jsons/acdc_domain_shift.json"

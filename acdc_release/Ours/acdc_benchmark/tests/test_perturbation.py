@@ -86,6 +86,25 @@ def test_no_perturbation_is_identity_in_training_and_tta():
         assert head.dropout.eval()(features) is features
 
 
+def test_single_head_noise_only_changes_the_first_head():
+    torch.manual_seed(42)
+    model = Model()
+    configure_heads(model, "feature_noise_head1_20")
+    features = torch.ones(2, 8, 4, 4, 4)
+    model.train()
+    noisy = model.head1.dropout(features)
+    assert not torch.equal(noisy, features)
+    assert torch.all((noisy >= .8) & (noisy <= 1.2))
+    assert model.head2.dropout(features) is features
+    model.eval()
+    assert model.head1.dropout(features) is features
+    assert model.head2.dropout(features) is features
+    for head in (model.head1, model.head2):
+        head.dropout.train()
+    assert not torch.equal(model.head1.dropout(features), noisy)
+    assert model.head2.dropout(features) is features
+
+
 def test_tta_updates_only_outputs_and_restores_each_frame():
     torch.manual_seed(42)
     model = Model()
