@@ -217,7 +217,7 @@ def load_predictor(args, config, device):
                 or not trained_config["training"].get("paper_aligned")
             ):
                 raise ValueError("Directional evaluation requires a paper-aligned checkpoint")
-            if args.tta:
+            if args.tta or getattr(args, "fixed_adapter_mc", False):
                 from .continual_tta import ContinualMeanU
                 return ContinualMeanU(model, config, device, args.tta_lr, infer_volume,
                                       record_heads=getattr(args, "save_head_segmentations", False))
@@ -308,8 +308,9 @@ def cohort(args):
 
 def run(args):
     import torch
-    if args.tta and not args.perturbation:
-        raise ValueError("--tta requires --perturbation")
+    mc_inference = args.tta or args.fixed_adapter_mc
+    if mc_inference and not args.perturbation:
+        raise ValueError("--tta and --fixed-adapter-mc require --perturbation")
     if args.tta_batch_size < 1 or not np.isfinite(args.tta_lr) or args.tta_lr <= 0:
         raise ValueError("TTA requires a positive batch size and learning rate")
     if args.perturbation and (args.method != "ours" or not args.error_auroc):
@@ -342,6 +343,8 @@ def run(args):
                         tta_recipe={"name": "chapter33_continual_mean_u_all_windows_v1",
                                     "batch_size": args.tta_batch_size, "learning_rate": args.tta_lr})
         torch.manual_seed(2026 if args.directional_zernike else 42)
+    if args.fixed_adapter_mc:
+        protocol["fixed_adapter_mc"] = True
     if args.directional_zernike:
         config["zernike"]["descriptor"] = "directional_coefficients"
         protocol["zernike_descriptor"] = config["zernike"]["descriptor"]
@@ -364,7 +367,7 @@ def run(args):
         else:
             raise ValueError("Provide --ueo-validation only for UEO on test")
     reference_protocol = {k: v for k, v in protocol.items()
-                          if k not in ("head_perturbation", "tta", "tta_recipe", "zernike_descriptor")}
+                          if k not in ("head_perturbation", "tta", "tta_recipe", "zernike_descriptor", "fixed_adapter_mc")}
     reference = None if args.reference is None else read_reference(args.reference, reference_protocol, expected)
     args.output_dir.mkdir(parents=True, exist_ok=False)
     if reference is None:
@@ -378,11 +381,11 @@ def run(args):
         head_geometry = (tuple(protocol["roi_size"]), tuple(protocol["target_spacing"]))
     rows, frame_identity = [], {}
     pending, tta_batches = [], []
-    inference_context = torch.no_grad if args.tta else torch.inference_mode
+    inference_context = torch.no_grad if mc_inference else torch.inference_mode
     with inference_context():
         for record, image, labels, valid in cases():
             case = record["subject_id"]
-            prediction = predict(image.to(device), case) if args.tta else predict(image.to(device))
+            prediction = predict(image.to(device), case) if mc_inference else predict(image.to(device))
             if args.perturbation:
                 output, steps = prediction
                 prediction = output.base_class_probability
@@ -401,7 +404,7 @@ def run(args):
                                                    probability[:, support].argmax(0) != labels[support]),
                            head_probability_l1=float(difference[support].mean()), tta_steps=steps)
                 if args.save_head_segmentations:
-                    head_probabilities = (output.tta_head_class_probabilities if args.tta
+                    head_probabilities = (output.tta_head_class_probabilities if mc_inference
                                           else output.head_class_probabilities)
                     for index, head in enumerate(head_probabilities, start=1):
                         segmentation = head[0].argmax(0).cpu().numpy().astype(np.uint8)
@@ -478,7 +481,10 @@ def add_arguments(parser):
     parser.add_argument("--error-auroc", action="store_true")
     from .perturbation import SUPPORTED_VARIANTS
     parser.add_argument("--perturbation", choices=SUPPORTED_VARIANTS)
-    parser.add_argument("--tta", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--tta", action="store_true")
+    mode.add_argument("--fixed-adapter-mc", action="store_true",
+                      help="Use the TTA prediction path with initial adapters and no optimizer updates")
     parser.add_argument("--tta-batch-size", type=int, default=16)
     parser.add_argument("--tta-lr", type=float, default=1e-3)
     parser.add_argument("--directional-zernike", action="store_true")

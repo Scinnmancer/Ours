@@ -25,6 +25,25 @@ def paired_auc(current, reference):
                 ci_high=float(high), paired_patients=len(differences))
 
 
+def fixed_adapter_ablation(control_dir, online_dir):
+    control, online = [json.loads((directory / "protocol.json").read_text())
+                       for directory in (control_dir, online_dir)]
+    expected = {**online["comparison"], "tta": False, "fixed_adapter_mc": True}
+    if (online["comparison"]["tta"] is not True or control["comparison"] != expected
+            or any(control[key] != online[key] for key in
+                   ("method", "checkpoint_sha256", "reference_checkpoint_sha256", "frames"))):
+        raise ValueError("Fixed adapter and online TTA must share weights, cohort and prediction protocol")
+    if control["domain"]["tta_optimizer_updates"] != 0 or online["domain"]["tta_optimizer_updates"] < 1:
+        raise ValueError("Expected only online TTA to perform updates")
+    metrics = ("Dice", "ECE", "HD95", "AURC", "native_AUROC", "error_AUROC", "head1_Dice", "head2_Dice")
+    rows = []
+    for mode, saved in (("fixed_adapter_mc", control), ("online_tta", online)):
+        rows.append(dict(mode=mode, **{metric: saved["domain"][metric] for metric in metrics}))
+    rows.append(dict(mode="online_minus_fixed", **{metric: rows[1][metric] - rows[0][metric]
+                     for metric in metrics if rows[0][metric] is not None and rows[1][metric] is not None}))
+    write_csv(control_dir / "test_fixed_adapter_ablation.csv", rows)
+
+
 def build(root, split, variants=VARIANTS, control_variant="dropout"):
     values, patients = {}, {}
     reference = None
@@ -72,5 +91,10 @@ if __name__ == "__main__":
     parser.add_argument("split")
     parser.add_argument("variants", nargs="*")
     parser.add_argument("--control", default="dropout")
+    parser.add_argument("--online-tta-dir", type=Path,
+                        help="Compare the fixed-adapter MC evaluation at ROOT with this online run")
     args = parser.parse_args()
-    build(args.root, args.split, args.variants or VARIANTS, args.control)
+    if args.online_tta_dir is None:
+        build(args.root, args.split, args.variants or VARIANTS, args.control)
+    else:
+        fixed_adapter_ablation(args.root, args.online_tta_dir)
